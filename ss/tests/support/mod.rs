@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use ss::client::Client;
@@ -139,8 +139,26 @@ impl Env {
         }
     }
 
+    /// Bounded because an in-process daemon on this thread's runtime cannot answer while a failed test unwinds here.
     pub fn stop_daemon(&self) {
-        let _ = self.command("ssd").arg("stop").output();
+        let Ok(mut child) = self
+            .command("ssd")
+            .arg("stop")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return;
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     pub fn root(&self) -> PathBuf {

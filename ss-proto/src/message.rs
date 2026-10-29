@@ -62,8 +62,6 @@ pub struct DaemonStatus {
     pub roots: Vec<String>,
     pub watches: Vec<String>,
     pub active_watchers: u64,
-    pub queries_running: u64,
-    pub queries_waiting: u64,
     pub queries_busy: u64,
     pub index_busy: u64,
     pub chunks_seen: u64,

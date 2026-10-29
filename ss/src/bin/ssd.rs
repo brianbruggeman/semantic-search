@@ -112,8 +112,8 @@ fn print_status(status: &DaemonStatus) {
         .iter()
         .for_each(|watch| println!("  {watch}"));
     println!(
-        "queries: {} running, {} waiting, {} rejected busy; index rejected busy: {}",
-        status.queries_running, status.queries_waiting, status.queries_busy, status.index_busy
+        "queries rejected busy: {}; index rejected busy: {}",
+        status.queries_busy, status.index_busy
     );
     println!(
         "chunks: {} seen, {} embedded, {} skipped",

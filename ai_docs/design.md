@@ -15,8 +15,8 @@ callers, a crashed client leaves nothing behind (the request still runs to compl
   workspace + lint shape (`rg-pool/Cargo.toml:1-16`), tier gate (`scripts/gate.sh`, `x86_64-unknown-none`), toolchain pin.
 - proxima daemon precedent: `tools/proxima-cli/src/daemon.rs:80` (`#[proxima::main(runtime = "tokio")]`) and `:106-120`
   (`Exporter::fan([std, file])` + drain thread: console AND file, never OTLP-only).
-- admission: `proxima-primitives/src/pipe/credit_gate.rs:31` `CreditGate` wakes all waiters (`:57`, `notify_waiters`)
-  and has no depth bound: not FIFO, cannot answer `busy`. ss adds one wrapper pipe, `Admit`, over a FIFO semaphore.
+- admission: proxima's own `SinkFront<Job>` (bounded FIFO + `FailMode`, the engine under telemetry's `OverflowPolicy`)
+  drained by `cap` worker tasks; no ss admission type. `CreditGate` wakes all waiters and has no depth bound. See `backpressure.md`.
   `Pipe` is `pipe/primitives.rs:91`; composition is `PipeExt::and_then` (`pipe/ext.rs:48`).
 - runtime: prime has no Unix-socket or named-pipe adapter (`proxima/ai_docs/windows-surface.jsonl`, `net-adapters`), so
   the daemon runs on the tokio fallback; chunker, fusion and codec are runtime-free and tested on prime.
@@ -47,7 +47,7 @@ BadRequest|Internal}`. `LineDecoder::push(&[u8])` / `next_frame()` do the framin
 - sink-shaped `StoreFile`: `Flow<EmbeddedFile> -> FileReport` (one transaction; the report feeds counters and tests).
 - Per file: `ReadFile.and_then(Chunk).and_then(Embed).and_then(StoreFile)`; `Flow::Done` short-circuits unchanged files.
 - Query: embed (query lane) + exact cosine scan + FTS5 BM25 -> RRF (k = 60). `Router: Request -> Response` is a pipe;
-  `Admit` wraps search (cap 8, queue 64) and index (cap 2, queue 8). The embed pool has N low-priority threads and a
+  Search runs through a `SinkFront` lane (cap 8, depth 64, `drop_newest`), index through another (cap 2, depth 8, `drop_oldest`). The embed pool has N low-priority threads and a
   query lane drained first, so an index flood cannot starve queries.
 
 ## watch
@@ -66,4 +66,4 @@ Stages carry `#[proxima::instrument]`; each index run adds `chunks_seen/embedded
 
 ## abandoned
 Per-call embedding in the CLI; an embedder trait (it is a pipe); `Mutex<TextEmbedding>` (worker threads own models);
-sqlite-vec (exact scan suffices); `CreditGate` for admission. Unverifiable here: Windows runtime behavior.
+sqlite-vec (exact scan suffices); `CreditGate` and a bespoke `Admit` wrapper for admission. Unverifiable here: Windows runtime behavior.

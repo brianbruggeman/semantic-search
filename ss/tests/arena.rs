@@ -5,72 +5,165 @@ mod support;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use ss::client::Client;
-use ss::daemon::{RunOutcome, run};
+use ss::daemon::{RunOutcome, ServeError, run};
 use ss::embed::{EmbedPool, hash_embed};
 use ss::settings::Settings;
-use ss_proto::{ErrorKind, Request, Response};
+use ss_proto::{DaemonStatus, ErrorKind, Request, Response};
 use support::{Env, copy_dir, wait_until_listening};
+use tokio::task::JoinHandle;
 
-fn search(path: &Path) -> Request {
+const QUERY_TRIGGER: &str = "embed pool worker";
+const INDEX_TRIGGER: &str = "gate_marker_unique_token";
+
+type Daemon = JoinHandle<Result<RunOutcome, ServeError>>;
+
+fn search(path: &Path, limit: u32) -> Request {
     Request::Search {
-        query: "embed pool worker".to_owned(),
+        query: QUERY_TRIGGER.to_owned(),
         path: path.to_string_lossy().into_owned(),
-        limit: 5,
+        limit,
     }
 }
 
-fn gated_pool(armed: &Arc<AtomicBool>, gate: &flume::Receiver<()>) -> EmbedPool {
-    let (armed, gate) = (Arc::clone(armed), gate.clone());
-    EmbedPool::spawn(1, move || {
-        let (armed, gate) = (Arc::clone(&armed), gate.clone());
-        Ok(move |texts: &[String]| {
-            if armed.load(Ordering::SeqCst) {
-                let _ = gate.recv();
-            }
-            hash_embed(texts)
+fn index(path: &Path) -> Request {
+    Request::Index {
+        path: path.to_string_lossy().into_owned(),
+    }
+}
+
+/// Embed workers that block on `wait` while armed, but only for batches containing the trigger text.
+struct Gate {
+    armed: Arc<AtomicBool>,
+    entered: Arc<AtomicUsize>,
+    release: flume::Sender<()>,
+    wait: flume::Receiver<()>,
+}
+
+impl Gate {
+    fn new() -> Self {
+        let (release, wait) = flume::unbounded::<()>();
+        Self {
+            armed: Arc::new(AtomicBool::new(false)),
+            entered: Arc::new(AtomicUsize::new(0)),
+            release,
+            wait,
+        }
+    }
+
+    fn pool(&self, workers: usize, trigger: &'static str) -> EmbedPool {
+        let (armed, entered, wait) = (
+            Arc::clone(&self.armed),
+            Arc::clone(&self.entered),
+            self.wait.clone(),
+        );
+        EmbedPool::spawn(workers, move || {
+            let (armed, entered, wait) = (Arc::clone(&armed), Arc::clone(&entered), wait.clone());
+            Ok(move |texts: &[String]| {
+                let held =
+                    armed.load(Ordering::SeqCst) && texts.iter().any(|text| text.contains(trigger));
+                if held {
+                    entered.fetch_add(1, Ordering::SeqCst);
+                    let _ = wait.recv();
+                }
+                hash_embed(texts)
+            })
         })
-    })
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    fn release_one(&self) {
+        self.release.send(()).expect("release one blocked embed");
+    }
+
+    fn open(&self) {
+        self.armed.store(false, Ordering::SeqCst);
+        self.release_one();
+    }
+
+    async fn wait_entered(&self, count: usize) {
+        for _ in 0..400 {
+            if self.entered.load(Ordering::SeqCst) >= count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("embed gate never reached {count} blocked batches");
+    }
+}
+
+async fn settle() {
+    tokio::time::sleep(Duration::from_millis(150)).await;
+}
+
+async fn start(env: &Env, settings: Settings, pool: EmbedPool) -> (Client, Daemon) {
+    copy_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &env.root().join("src"),
+    );
+    let daemon = tokio::spawn(run(settings.clone(), Some(pool)));
+    let client = Client::new(settings);
+    wait_until_listening(&client).await;
+    let indexed = client.send(index(&env.root())).await;
+    assert!(
+        matches!(indexed, Ok(Response::Indexed { .. })),
+        "index failed: {indexed:?}"
+    );
+    (client, daemon)
+}
+
+async fn stop(client: &Client, daemon: Daemon) {
+    drop(client.send(Request::Stop).await);
+    assert_eq!(
+        daemon.await.expect("daemon task").expect("daemon result"),
+        RunOutcome::Stopped
+    );
+}
+
+async fn status_of(client: &Client) -> DaemonStatus {
+    match client.send(Request::Status).await {
+        Ok(Response::Status { status }) => status,
+        other => panic!("status failed: {other:?}"),
+    }
+}
+
+fn write_marked_file(env: &Env) {
+    let body = format!(
+        "pub fn marked() -> &'static str {{\n    let token = \"{INDEX_TRIGGER}\";\n    token\n}}\n"
+    );
+    std::fs::write(env.root().join("src/marked.rs"), body).expect("write marked file");
 }
 
 #[proxima::test(runtime = "tokio")]
-async fn flood_beyond_queue_depth_gets_busy_for_the_excess_and_hits_for_the_admitted() {
+async fn flood_beyond_queue_depth_gets_busy_for_exactly_the_excess_and_hits_for_the_admitted() {
     let env = Env::new();
+    let gate = Gate::new();
     let settings = Settings {
         query_cap: 1,
         query_depth: 2,
         embed_workers: 1,
         ..env.settings()
     };
-    let (armed, (gate_tx, gate_rx)) = (Arc::new(AtomicBool::new(false)), flume::unbounded::<()>());
-    copy_dir(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &env.root().join("src"),
-    );
-    let daemon = tokio::spawn(run(settings.clone(), Some(gated_pool(&armed, &gate_rx))));
-    let client = Client::new(settings);
-    wait_until_listening(&client).await;
-    let indexed = client
-        .send(Request::Index {
-            path: env.root().to_string_lossy().into_owned(),
-        })
-        .await;
-    assert!(
-        matches!(indexed, Ok(Response::Indexed { .. })),
-        "index failed: {indexed:?}"
-    );
-    armed.store(true, Ordering::SeqCst);
-
+    let (client, daemon) = start(&env, settings, gate.pool(1, QUERY_TRIGGER)).await;
+    gate.arm();
     let (results_tx, mut results) = tokio::sync::mpsc::unbounded_channel();
-    for _ in 0..20 {
+    for flooded in 0..20 {
         let (client, results_tx, scope) = (client.clone(), results_tx.clone(), env.root());
-        tokio::spawn(async move { drop(results_tx.send(client.send(search(&scope)).await)) });
+        tokio::spawn(async move { drop(results_tx.send(client.send(search(&scope, 5)).await)) });
+        if flooded == 0 {
+            gate.wait_entered(1).await;
+        }
     }
+
     let mut busy = 0;
     while busy < 17 {
-        let reply = tokio::time::timeout(std::time::Duration::from_secs(20), results.recv()).await;
+        let reply = tokio::time::timeout(Duration::from_secs(20), results.recv()).await;
         match reply
             .expect("17 busy replies arrive without waiting on the gate")
             .expect("channel open")
@@ -83,7 +176,7 @@ async fn flood_beyond_queue_depth_gets_busy_for_the_excess_and_hits_for_the_admi
         }
     }
     for _ in 0..3 {
-        gate_tx.send(()).expect("release one embed");
+        gate.release_one();
     }
     let mut admitted_hits = Vec::new();
     for _ in 0..3 {
@@ -93,22 +186,138 @@ async fn flood_beyond_queue_depth_gets_busy_for_the_excess_and_hits_for_the_admi
         }
     }
 
-    println!(
-        "flood: 20 sent, busy={busy}, admitted={}, hits per admitted={admitted_hits:?}",
-        admitted_hits.len()
-    );
+    assert_eq!(admitted_hits.len(), 3, "1 running + depth 2 admitted");
     assert!(
         admitted_hits.iter().all(|count| *count > 0),
         "hits={admitted_hits:?}"
     );
-    let status = client.send(Request::Status).await;
-    let Ok(Response::Status { status }) = status else {
-        panic!("status failed: {status:?}")
+    assert_eq!(status_of(&client).await.queries_busy, 17);
+    stop(&client, daemon).await;
+}
+
+#[proxima::test(runtime = "tokio")]
+async fn admitted_queries_complete_in_arrival_order() {
+    let env = Env::new();
+    let gate = Gate::new();
+    let settings = Settings {
+        query_cap: 1,
+        query_depth: 4,
+        embed_workers: 1,
+        ..env.settings()
     };
-    assert_eq!(status.queries_busy, 17);
-    drop(client.send(Request::Stop).await);
-    assert_eq!(
-        daemon.await.expect("daemon task").expect("daemon result"),
-        RunOutcome::Stopped
+    let (client, daemon) = start(&env, settings, gate.pool(1, QUERY_TRIGGER)).await;
+    gate.arm();
+    let (done_tx, mut done) = tokio::sync::mpsc::unbounded_channel();
+    for id in 1..=5_u32 {
+        let (client, done_tx, scope) = (client.clone(), done_tx.clone(), env.root());
+        tokio::spawn(async move {
+            let reply = client.send(search(&scope, id)).await;
+            drop(done_tx.send((id, reply)));
+        });
+        if id == 1 {
+            gate.wait_entered(1).await;
+        }
+        settle().await;
+    }
+
+    let mut completed = Vec::new();
+    for _ in 0..5 {
+        gate.release_one();
+        let (id, reply) = tokio::time::timeout(Duration::from_secs(20), done.recv())
+            .await
+            .expect("completion")
+            .expect("channel open");
+        let Ok(Response::Hits { hits }) = reply else {
+            panic!("query {id} must be admitted, got {reply:?}")
+        };
+        assert_eq!(hits.len(), id as usize, "limit {id} returns {id} hits");
+        completed.push(id);
+    }
+
+    assert_eq!(completed, vec![1, 2, 3, 4, 5]);
+    stop(&client, daemon).await;
+}
+
+#[proxima::test(runtime = "tokio")]
+async fn a_query_during_a_reindex_returns_while_the_reindex_is_still_running() {
+    let env = Env::new();
+    let gate = Gate::new();
+    let settings = Settings {
+        embed_workers: 2,
+        ..env.settings()
+    };
+    let (client, daemon) = start(&env, settings, gate.pool(2, INDEX_TRIGGER)).await;
+    write_marked_file(&env);
+    gate.arm();
+    let reindex = {
+        let (client, scope) = (client.clone(), env.root());
+        tokio::spawn(async move { client.send(index(&scope)).await })
+    };
+    gate.wait_entered(1).await;
+
+    let reply = tokio::time::timeout(Duration::from_secs(20), client.send(search(&env.root(), 5)))
+        .await
+        .expect("query returns while the reindex is blocked");
+    let still_running = !reindex.is_finished();
+
+    let Ok(Response::Hits { hits }) = reply else {
+        panic!("query must return hits during a reindex, got {reply:?}")
+    };
+    assert!(!hits.is_empty(), "hits during reindex");
+    assert!(
+        still_running,
+        "reindex was still running when the query returned"
     );
+    gate.open();
+    let finished = reindex.await.expect("reindex task");
+    assert!(
+        matches!(finished, Ok(Response::Indexed { .. })),
+        "{finished:?}"
+    );
+    stop(&client, daemon).await;
+}
+
+#[proxima::test(runtime = "tokio")]
+async fn a_full_index_queue_under_drop_oldest_evicts_the_oldest_waiting_runs() {
+    let env = Env::new();
+    let gate = Gate::new();
+    let settings = Settings {
+        index_cap: 1,
+        index_depth: 2,
+        index_overflow: "drop_oldest".to_owned(),
+        embed_workers: 1,
+        ..env.settings()
+    };
+    let (client, daemon) = start(&env, settings, gate.pool(1, INDEX_TRIGGER)).await;
+    write_marked_file(&env);
+    gate.arm();
+    let labels = ["running", "evicted-a", "evicted-b", "kept-a", "kept-b"];
+    let mut runs = Vec::new();
+    for label in labels {
+        let (client, scope) = (client.clone(), env.root());
+        runs.push(tokio::spawn(
+            async move { client.send(index(&scope)).await },
+        ));
+        if label == "running" {
+            gate.wait_entered(1).await;
+        }
+        settle().await;
+    }
+    gate.open();
+
+    let mut busy = Vec::new();
+    for (label, run) in labels.into_iter().zip(runs) {
+        match run.await.expect("index task") {
+            Ok(Response::Indexed { .. }) => {}
+            Ok(Response::Error {
+                error: ErrorKind::Busy,
+                ..
+            }) => busy.push(label),
+            other => panic!("{label}: expected indexed or busy, got {other:?}"),
+        }
+    }
+
+    assert_eq!(busy, vec!["evicted-a", "evicted-b"]);
+    assert_eq!(status_of(&client).await.index_busy, 2);
+    stop(&client, daemon).await;
 }

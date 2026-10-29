@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use conflaguration::Settings as ConfigSettings;
+use proxima::pipe::FailMode;
 use ss_ipc::Endpoint;
 
 use crate::embed::EmbedderKind;
@@ -25,15 +26,21 @@ pub struct Settings {
     /// Searches running at once
     #[setting(default = 8)]
     pub query_cap: usize,
-    /// Searches allowed to wait for a slot before `busy` is returned
+    /// Searches allowed to wait for a worker, rounded up to a power of two; beyond it the overflow strategy sheds
     #[setting(default = 64)]
     pub query_depth: usize,
+    /// What a full search queue does with a new search: `drop_newest`, `drop_oldest` or `refuse`; the shed caller gets `busy`
+    #[setting(default_str = "drop_newest")]
+    pub query_overflow: String,
     /// Index runs at once
     #[setting(default = 2)]
     pub index_cap: usize,
-    /// Index runs allowed to wait for a slot before `busy` is returned
+    /// Index runs allowed to wait for a worker, rounded up to a power of two; beyond it the overflow strategy sheds
     #[setting(default = 8)]
     pub index_depth: usize,
+    /// What a full index queue does with a new run: `drop_newest`, `drop_oldest` or `refuse`; a rescan recovers what was shed
+    #[setting(default_str = "drop_oldest")]
+    pub index_overflow: String,
     /// Seconds with no watches and no clients before the daemon exits
     #[setting(default = 600)]
     pub idle_secs: u64,
@@ -55,6 +62,15 @@ pub struct Settings {
     /// Path to the `ssd` binary; empty selects the sibling of the running executable
     #[setting(default_str = "")]
     pub daemon_bin: String,
+}
+
+fn parse_fail_mode(name: &str) -> Option<FailMode> {
+    match name {
+        "drop_newest" => Some(FailMode::DropNewest),
+        "drop_oldest" => Some(FailMode::DropOldest),
+        "refuse" => Some(FailMode::FailClosed),
+        _ => None,
+    }
 }
 
 impl Settings {
@@ -89,6 +105,16 @@ impl Settings {
     #[must_use]
     pub fn embedder_kind(&self) -> EmbedderKind {
         EmbedderKind::parse(&self.embedder).unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn query_fail_mode(&self) -> FailMode {
+        parse_fail_mode(&self.query_overflow).unwrap_or(FailMode::DropNewest)
+    }
+
+    #[must_use]
+    pub fn index_fail_mode(&self) -> FailMode {
+        parse_fail_mode(&self.index_overflow).unwrap_or(FailMode::DropOldest)
     }
 
     #[must_use]
@@ -176,6 +202,20 @@ mod tests {
             ),
             (8, 2, 600)
         );
+    }
+
+    #[test]
+    fn overflow_names_map_to_proxima_fail_modes_and_unknown_names_take_the_lane_default() {
+        let settings = Settings {
+            query_overflow: "drop_oldest".to_owned(),
+            index_overflow: "bogus".to_owned(),
+            ..Settings::from_env().expect("defaults")
+        };
+
+        assert_eq!(settings.query_fail_mode(), FailMode::DropOldest);
+        assert_eq!(settings.index_fail_mode(), FailMode::DropOldest);
+        assert_eq!(parse_fail_mode("refuse"), Some(FailMode::FailClosed));
+        assert_eq!(parse_fail_mode("drop_newest"), Some(FailMode::DropNewest));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use proxima::pipe::Pipe;
+use proxima::pipe::{Admission, DropReason, FailMode, Pipe, SinkFront};
 use proxima::telemetry::{info, warn};
 use ss_ipc::{InstanceLock, ListenerExt as _, Stream, listen};
 use ss_proto::{
@@ -13,9 +13,9 @@ use ss_proto::{
 };
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc, oneshot};
+use tokio::task::JoinHandle;
 
-use crate::admit::{Admit, AdmitError, AdmitGauge};
 use crate::embed::{EmbedPool, EmbedderKind, hash_embed, load_fastembed};
 use crate::error::IndexError;
 use crate::index::{Shard, index_changed, index_tree};
@@ -187,7 +187,7 @@ impl Core {
         Ok(search(&entry.shard, &scope, query, limit).await?)
     }
 
-    async fn status(&self, search: &AdmitGauge, index: &AdmitGauge) -> DaemonStatus {
+    async fn status(&self, queries_busy: u64, index_busy: u64) -> DaemonStatus {
         let registry = self.registry.lock().await;
         let paths = |list: &[PathBuf]| list.iter().map(|path| path.display().to_string()).collect();
         DaemonStatus {
@@ -196,10 +196,8 @@ impl Core {
             roots: paths(&registry.roots),
             watches: paths(&registry.watches),
             active_watchers: self.hub.count().await as u64,
-            queries_running: search.running() as u64,
-            queries_waiting: search.waiting() as u64,
-            queries_busy: search.rejected(),
-            index_busy: index.rejected(),
+            queries_busy,
+            index_busy,
             chunks_seen: self.totals.seen.load(Ordering::Relaxed),
             chunks_embedded: self.totals.embedded.load(Ordering::Relaxed),
             chunks_skipped: self.totals.skipped.load(Ordering::Relaxed),
@@ -348,34 +346,123 @@ impl Pipe for IndexPipe {
     }
 }
 
-/// `Request -> Response`: every client call enters the arena here, through the admission gates.
+enum Work {
+    Search(SearchArgs),
+    Index(String),
+}
+
+struct Job {
+    work: Work,
+    reply: oneshot::Sender<Response>,
+}
+
+/// `Request -> Response`: every client call enters the arena here.
+///
+/// Search and index work each go through a `SinkFront<Job>` (proxima's bounded FIFO with a `FailMode`, the
+/// engine under telemetry's `OverflowPolicy`); `cap` worker tasks drain it. A `Dropped` admission is the
+/// proxima-native overload outcome and becomes the wire `busy` only in [`render`], at this edge.
 pub struct Router {
     core: Arc<Core>,
-    search: Admit<SearchPipe>,
-    index: Admit<IndexPipe>,
+    queries: SinkFront<Job>,
+    queries_wake: Arc<Notify>,
+    indexing: SinkFront<Job>,
+    indexing_wake: Arc<Notify>,
+    workers: Vec<JoinHandle<()>>,
 }
 
 impl Router {
     fn new(core: &Arc<Core>) -> Self {
         let settings = &core.settings;
+        let (queries, queries_wake, mut workers) = open_lane(
+            core,
+            settings.query_cap,
+            settings.query_depth,
+            settings.query_fail_mode(),
+        );
+        let (indexing, indexing_wake, index_workers) = open_lane(
+            core,
+            settings.index_cap,
+            settings.index_depth,
+            settings.index_fail_mode(),
+        );
+        workers.extend(index_workers);
         Self {
             core: Arc::clone(core),
-            search: Admit::new(
-                SearchPipe {
-                    core: Arc::clone(core),
-                },
-                settings.query_cap,
-                settings.query_depth,
-            ),
-            index: Admit::new(
-                IndexPipe {
-                    core: Arc::clone(core),
-                },
-                settings.index_cap,
-                settings.index_depth,
-            ),
+            queries,
+            queries_wake,
+            indexing,
+            indexing_wake,
+            workers,
         }
     }
+}
+
+impl Drop for Router {
+    fn drop(&mut self) {
+        self.workers.iter().for_each(JoinHandle::abort);
+    }
+}
+
+fn open_lane(
+    core: &Arc<Core>,
+    cap: usize,
+    depth: usize,
+    mode: FailMode,
+) -> (SinkFront<Job>, Arc<Notify>, Vec<JoinHandle<()>>) {
+    let front = SinkFront::new(depth, mode);
+    front.arm();
+    let wake = Arc::new(Notify::new());
+    let workers = (0..cap.max(1))
+        .map(|_| {
+            tokio::spawn(work_loop(
+                Arc::clone(core),
+                front.clone(),
+                Arc::clone(&wake),
+            ))
+        })
+        .collect();
+    (front, wake, workers)
+}
+
+async fn work_loop(core: Arc<Core>, front: SinkFront<Job>, wake: Arc<Notify>) {
+    loop {
+        match front.drain_one() {
+            Some(job) => {
+                let response = execute(&core, job.work).await;
+                drop(job.reply.send(response));
+            }
+            None => wake.notified().await,
+        }
+    }
+}
+
+async fn execute(core: &Arc<Core>, work: Work) -> Response {
+    let core = Arc::clone(core);
+    match work {
+        Work::Search(args) => reply(
+            SearchPipe { core }
+                .call(args)
+                .await
+                .map(|hits| Response::Hits { hits }),
+        ),
+        Work::Index(path) => reply(
+            IndexPipe { core }
+                .call(path)
+                .await
+                .map(|stats| Response::Indexed { stats }),
+        ),
+    }
+}
+
+async fn submit(front: &SinkFront<Job>, wake: &Notify, work: Work) -> Result<Response, DropReason> {
+    let (reply, answer) = oneshot::channel();
+    let admission = front.emit(Job { work, reply });
+    match admission {
+        Admission::Dropped(reason) if !admission.leaves_item_queued() => return Err(reason),
+        Admission::Dormant => return Err(DropReason::Refused),
+        Admission::Accepted | Admission::Dropped(_) => wake.notify_one(),
+    }
+    answer.await.map_err(|_| DropReason::OldestEvicted)
 }
 
 impl Pipe for Router {
@@ -392,23 +479,15 @@ impl Pipe for Router {
                     path,
                     limit: limit as usize,
                 };
-                respond(
-                    self.search
-                        .call(args)
-                        .await
-                        .map(|hits| Response::Hits { hits }),
-                )
+                render(submit(&self.queries, &self.queries_wake, Work::Search(args)).await)
             }
-            Request::Index { path } => respond(
-                self.index
-                    .call(path)
-                    .await
-                    .map(|stats| Response::Indexed { stats }),
-            ),
+            Request::Index { path } => {
+                render(submit(&self.indexing, &self.indexing_wake, Work::Index(path)).await)
+            }
             Request::Status => Response::Status {
                 status: self
                     .core
-                    .status(&self.search.gauge(), &self.index.gauge())
+                    .status(self.queries.dropped(), self.indexing.dropped())
                     .await,
             },
             Request::Stop => {
@@ -434,18 +513,18 @@ fn watch_reply(outcome: Result<Vec<String>, ServeError>) -> Response {
     }
 }
 
-fn respond(outcome: Result<Response, AdmitError<ServeError>>) -> Response {
-    match outcome {
-        Ok(response) => response,
-        Err(AdmitError::Busy) => Response::Error {
-            error: ErrorKind::Busy,
-            message: "busy: all slots taken and the wait queue is full".to_owned(),
-        },
-        Err(AdmitError::Inner(error)) => Response::Error {
-            error: error.kind(),
-            message: error.to_string(),
-        },
-    }
+fn reply(outcome: Result<Response, ServeError>) -> Response {
+    outcome.unwrap_or_else(|error| Response::Error {
+        error: error.kind(),
+        message: error.to_string(),
+    })
+}
+
+fn render(outcome: Result<Response, DropReason>) -> Response {
+    outcome.unwrap_or_else(|reason| Response::Error {
+        error: ErrorKind::Busy,
+        message: format!("busy: the wait queue is full ({reason:?})"),
+    })
 }
 
 /// The embed pool a settings value asks for.
