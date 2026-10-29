@@ -533,12 +533,18 @@ fn render(outcome: Result<Response, DropReason>) -> Response {
 #[must_use]
 pub fn build_pool(settings: &Settings) -> EmbedPool {
     match settings.embedder_kind() {
-        EmbedderKind::Hash => EmbedPool::spawn(settings.embed_workers, || Ok(hash_embed)),
+        EmbedderKind::Hash => {
+            EmbedPool::with_lanes(settings.embed_query_workers, settings.embed_workers, || {
+                Ok(hash_embed)
+            })
+        }
         EmbedderKind::FastEmbed => {
             let (cache, threads) = (settings.model_cache_dir(), settings.embed_threads);
-            EmbedPool::spawn(settings.embed_workers, move || {
-                load_fastembed(&cache, threads)
-            })
+            EmbedPool::with_lanes(
+                settings.embed_query_workers,
+                settings.embed_workers,
+                move || load_fastembed(&cache, threads),
+            )
         }
     }
 }

@@ -61,8 +61,13 @@ struct Job {
     reply: oneshot::Sender<Result<Vec<Vec<f32>>, EmbedError>>,
 }
 
-/// A bounded pool of low-priority worker threads, each owning its own model.
-/// `Pipe<In = EmbedRequest, Out = Vec<Vec<f32>>>`: the embedder seam is a pipe, not a trait.
+/// Embedding worker threads, each owning its own model. `Pipe<In = EmbedRequest, Out = Vec<Vec<f32>>>`: the
+/// embedder seam is a pipe, not a trait.
+///
+/// The two lanes never share a worker: one thread serves [`Lane::Query`] at normal priority, `workers` low-priority
+/// threads serve [`Lane::Index`]. A search embeds its text in milliseconds, an index batch holds a worker for
+/// seconds; with shared workers every search queued behind whichever batch was running (measured 2.1-2.4 s
+/// instead of 16 ms, `examples/query_load.rs`).
 #[derive(Clone)]
 pub struct EmbedPool {
     query: flume::Sender<Job>,
@@ -70,8 +75,22 @@ pub struct EmbedPool {
 }
 
 impl EmbedPool {
-    /// Spawns `workers` threads; `factory` runs lazily on a worker's first job so idle daemons hold no model.
+    /// One query thread and `workers` index threads; see [`EmbedPool::with_lanes`].
     pub fn spawn<Factory, Model>(workers: usize, factory: Factory) -> Self
+    where
+        Factory: Fn() -> Result<Model, EmbedError> + Send + Sync + 'static,
+        Model: FnMut(&[String]) -> EmbedOutput + 'static,
+    {
+        Self::with_lanes(1, workers, factory)
+    }
+
+    /// Spawns `query_workers` query threads and `index_workers` index threads (each at least one); `factory`
+    /// runs lazily on a thread's first job so idle daemons hold no model.
+    pub fn with_lanes<Factory, Model>(
+        query_workers: usize,
+        index_workers: usize,
+        factory: Factory,
+    ) -> Self
     where
         Factory: Fn() -> Result<Model, EmbedError> + Send + Sync + 'static,
         Model: FnMut(&[String]) -> EmbedOutput + 'static,
@@ -79,42 +98,46 @@ impl EmbedPool {
         let (query, query_rx) = flume::unbounded::<Job>();
         let (index, index_rx) = flume::unbounded::<Job>();
         let factory = Arc::new(factory);
-        for number in 0..workers.max(1) {
-            let (query_rx, index_rx, factory) =
-                (query_rx.clone(), index_rx.clone(), Arc::clone(&factory));
-            let _ = thread::Builder::new()
-                .name(format!("ss-embed-{number}"))
-                .spawn(move || run_worker(&query_rx, &index_rx, factory.as_ref()));
+        for number in 0..query_workers.max(1) {
+            start_worker(Lane::Query, number, query_rx.clone(), &factory);
+        }
+        for number in 0..index_workers.max(1) {
+            start_worker(Lane::Index, number, index_rx.clone(), &factory);
         }
         Self { query, index }
     }
 }
 
-fn run_worker<Factory, Model>(
-    query: &flume::Receiver<Job>,
-    index: &flume::Receiver<Job>,
-    factory: &Factory,
+fn start_worker<Factory, Model>(
+    lane: Lane,
+    number: usize,
+    jobs: flume::Receiver<Job>,
+    factory: &Arc<Factory>,
 ) where
+    Factory: Fn() -> Result<Model, EmbedError> + Send + Sync + 'static,
+    Model: FnMut(&[String]) -> EmbedOutput + 'static,
+{
+    let factory = Arc::clone(factory);
+    let name = format!("ss-embed-{lane:?}-{number}").to_lowercase();
+    let _ = thread::Builder::new()
+        .name(name)
+        .spawn(move || run_worker(lane, &jobs, factory.as_ref()));
+}
+
+fn run_worker<Factory, Model>(lane: Lane, jobs: &flume::Receiver<Job>, factory: &Factory)
+where
     Factory: Fn() -> Result<Model, EmbedError>,
     Model: FnMut(&[String]) -> EmbedOutput,
 {
-    let _ = set_current_thread_priority(ThreadPriority::Min);
+    if lane == Lane::Index {
+        let _ = set_current_thread_priority(ThreadPriority::Min);
+    }
     let mut model: Option<Model> = None;
-    while let Some(job) = next_job(query, index) {
+    while let Ok(job) = jobs.recv() {
         let outcome =
             ensure_model(&mut model, factory).and_then(|ready| embed_checked(ready, &job.texts));
         let _ = job.reply.send(outcome);
     }
-}
-
-fn next_job(query: &flume::Receiver<Job>, index: &flume::Receiver<Job>) -> Option<Job> {
-    if let Ok(job) = query.try_recv() {
-        return Some(job);
-    }
-    flume::Selector::new()
-        .recv(query, Result::ok)
-        .recv(index, Result::ok)
-        .wait()
 }
 
 fn ensure_model<'a, Factory, Model>(
@@ -335,6 +358,50 @@ mod tests {
             assert_eq!((vectors.len(), vectors[0].len()), (1, HASH_DIM));
             assert!((length - 1.0).abs() < 1e-4, "length {length}");
         }
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn a_query_is_embedded_while_every_index_worker_is_busy() {
+        let (entered_tx, entered_rx) = flume::unbounded::<()>();
+        let (release_tx, release_rx) = flume::unbounded::<()>();
+        let pool = EmbedPool::spawn(1, move || {
+            let (entered, release) = (entered_tx.clone(), release_rx.clone());
+            Ok(move |texts: &[String]| {
+                if texts.iter().any(|text| text.contains("slow index batch")) {
+                    let _ = entered.send(());
+                    let _ = release.recv();
+                }
+                hash_embed(texts)
+            })
+        });
+        let busy = pool.clone();
+        let index_batch = tokio::spawn(async move {
+            busy.call(EmbedRequest {
+                texts: vec!["slow index batch".to_owned()],
+                lane: Lane::Index,
+            })
+            .await
+        });
+        entered_rx
+            .recv_async()
+            .await
+            .expect("index worker entered the batch");
+
+        let answered = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pool.call(EmbedRequest {
+                texts: vec!["walk files".to_owned()],
+                lane: Lane::Query,
+            }),
+        )
+        .await;
+        release_tx.send(()).expect("release the index batch");
+
+        assert!(
+            answered.is_ok_and(|vectors| vectors.is_ok()),
+            "the query waited behind the index batch"
+        );
+        assert!(index_batch.await.expect("index task").is_ok());
     }
 
     #[proxima::test(runtime = "tokio")]

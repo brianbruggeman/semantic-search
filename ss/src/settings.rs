@@ -17,9 +17,12 @@ pub struct Settings {
     /// Embedding backend: `fastembed` (local ONNX model) or `hash` (offline feature hashing)
     #[setting(default_str = "fastembed")]
     pub embedder: String,
-    /// Embedding worker threads, each owning a model; the cap on concurrent embedding work
+    /// Embedding worker threads for indexing, each owning a model; the cap on concurrent indexing work
     #[setting(default = 2)]
     pub embed_workers: usize,
+    /// Embedding worker threads reserved for search queries, each owning a model; indexing never uses them
+    #[setting(default = 1)]
+    pub embed_query_workers: usize,
     /// ONNX intra-op threads per embedding worker
     #[setting(default = 2)]
     pub embed_threads: usize,

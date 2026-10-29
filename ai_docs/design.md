@@ -47,8 +47,10 @@ BadRequest|Internal}`. `LineDecoder::push(&[u8])` / `next_frame()` do the framin
 - sink-shaped `StoreFile`: `Flow<EmbeddedFile> -> FileReport` (one transaction; the report feeds counters and tests).
 - Per file: `ReadFile.and_then(Chunk).and_then(Embed).and_then(StoreFile)`; `Flow::Done` short-circuits unchanged files.
 - Query: embed (query lane) + exact cosine scan + FTS5 BM25 -> RRF (k = 60). `Router: Request -> Response` is a pipe;
-  Search runs through a `SinkFront` lane (cap 8, depth 64, `drop_newest`), index through another (cap 2, depth 8, `drop_oldest`). The embed pool has N low-priority threads and a
-  query lane drained first, so an index flood cannot starve queries.
+  Search runs through a `SinkFront` lane (cap 8, depth 64, `drop_newest`), index through another (cap 2, depth 8, `drop_oldest`). The embed pool has `embed_workers` low-priority
+  index threads and `embed_query_workers` query threads that never take index work: a worker holds its model for a whole
+  index batch (seconds), so a shared "query first" pool still made every search wait for a running batch (measured
+  2.1-2.4 s vs 16 ms, `ss/examples/query_load.rs`).
 
 ## watch
 `ssd watch add` persists to `state.json`, starts the watcher, and its first batch is a full mtime+hash rescan; later
