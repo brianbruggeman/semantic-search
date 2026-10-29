@@ -7,7 +7,8 @@ use std::io::Read;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use support::{Env, tagged_copies, text};
+use ss::client::Client;
+use support::{Env, tagged_copies, text, wait_until_listening};
 
 #[proxima::test(runtime = "tokio")]
 async fn daemon_writes_spans_and_chunk_counters_to_the_file_sink_and_the_console() {
@@ -21,6 +22,7 @@ async fn daemon_writes_spans_and_chunk_counters_to_the_file_sink_and_the_console
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn ssd");
+    wait_until_listening(&Client::new(env.settings())).await;
     let indexed = env.run("ss", &["index", env.root().to_str().expect("utf8")]);
     assert_eq!(indexed.status.code(), Some(0));
     env.stop_daemon();
