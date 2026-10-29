@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use proxima::telemetry::debug;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::chunk::{ChunkKey, RawChunk};
@@ -49,6 +50,7 @@ pub struct Store {
 
 impl Store {
     /// Opens (creating if needed) the shard at `config.dir`; a model change wipes derived rows.
+    #[proxima::instrument]
     pub fn open(config: &StoreConfig) -> Result<Self, IndexError> {
         std::fs::create_dir_all(&config.dir)?;
         let conn = Connection::open(config.dir.join("index.db"))?;
@@ -191,6 +193,7 @@ impl Store {
     }
 
     /// Exact cosine scan (vectors are stored unit-length) over chunks under `prefix`.
+    #[proxima::instrument]
     pub fn vector_search(
         &self,
         query: &[f32],
@@ -207,12 +210,14 @@ impl Store {
                 Ok((row.get(0)?, dot(query, &blob)))
             })?
             .collect::<rusqlite::Result<_>>()?;
+        debug!("vector scan", scanned = scored.len());
         scored.sort_unstable_by(|left, right| right.1.total_cmp(&left.1));
         scored.truncate(limit);
         Ok(scored.into_iter().map(|(id, _)| id).collect())
     }
 
     /// BM25 over chunk text and path; ids best-first.
+    #[proxima::instrument]
     pub fn text_search(
         &self,
         terms: &[String],

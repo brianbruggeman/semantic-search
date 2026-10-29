@@ -5,10 +5,10 @@ use std::sync::Arc;
 use proxima::pipe::Pipe;
 use ss_proto::Hit;
 
-use crate::embed::{EmbedRequest, Lane, tokens};
+use crate::embed::{EmbedPool, EmbedRequest, Lane, tokens};
 use crate::error::IndexError;
 use crate::index::Shard;
-use crate::store::Store;
+use crate::store::{Store, StoreConfig};
 
 pub const RRF_K: f64 = 60.0;
 pub const CANDIDATES: usize = 50;
@@ -41,44 +41,69 @@ pub async fn search(
     if terms.is_empty() {
         return Ok(Vec::new());
     }
-    let vectors = shard
-        .pool()
-        .call(EmbedRequest {
-            texts: vec![query.to_owned()],
-            lane: Lane::Query,
-        })
-        .await?;
-    let embedding = vectors.into_iter().next().unwrap_or_default();
+    let embedding = embed_query(shard.pool(), query).await?;
     let (config, root) = (Arc::clone(&shard.config), shard.root.clone());
     let prefix = scope.strip_prefix(&root).map_or_else(
         |_| String::new(),
         |rel| rel.to_string_lossy().replace('\\', "/"),
     );
-    tokio::task::spawn_blocking(move || -> Result<Vec<Hit>, IndexError> {
-        let store = Store::open(&config)?;
-        let by_vector = store.vector_search(&embedding, &prefix, CANDIDATES)?;
-        let by_text = store.text_search(&terms, &prefix, CANDIDATES)?;
-        let mut hits = Vec::new();
-        for (id, score) in rrf_fuse(&[by_vector, by_text]).into_iter().take(limit) {
-            if let Some(row) = store.chunk(id)? {
-                hits.push(Hit {
-                    path: root.join(&row.path).to_string_lossy().into_owned(),
-                    start_line: row.start_line,
-                    end_line: row.end_line,
-                    score,
-                    preview: row
-                        .text
-                        .lines()
-                        .take(PREVIEW_LINES)
-                        .map(str::to_owned)
-                        .collect(),
-                });
-            }
+    tokio::task::spawn_blocking(move || scan(&config, &root, &embedding, &terms, &prefix, limit))
+        .await
+        .map_err(|error| IndexError::Join(error.to_string()))?
+}
+
+/// Waits in the query lane for a worker, then embeds the query text; the span covers both the wait and the model.
+#[proxima::instrument]
+async fn embed_query(pool: &EmbedPool, query: &str) -> Result<Vec<f32>, IndexError> {
+    let vectors = pool
+        .call(EmbedRequest {
+            texts: vec![query.to_owned()],
+            lane: Lane::Query,
+        })
+        .await?;
+    Ok(vectors.into_iter().next().unwrap_or_default())
+}
+
+#[proxima::instrument]
+fn scan(
+    config: &StoreConfig,
+    root: &Path,
+    embedding: &[f32],
+    terms: &[String],
+    prefix: &str,
+    limit: usize,
+) -> Result<Vec<Hit>, IndexError> {
+    let store = Store::open(config)?;
+    let by_vector = store.vector_search(embedding, prefix, CANDIDATES)?;
+    let by_text = store.text_search(terms, prefix, CANDIDATES)?;
+    render_hits(&store, root, &rrf_fuse(&[by_vector, by_text]), limit)
+}
+
+#[proxima::instrument]
+fn render_hits(
+    store: &Store,
+    root: &Path,
+    fused: &[(i64, f64)],
+    limit: usize,
+) -> Result<Vec<Hit>, IndexError> {
+    let mut hits = Vec::new();
+    for (id, score) in fused.iter().take(limit) {
+        if let Some(row) = store.chunk(*id)? {
+            hits.push(Hit {
+                path: root.join(&row.path).to_string_lossy().into_owned(),
+                start_line: row.start_line,
+                end_line: row.end_line,
+                score: *score,
+                preview: row
+                    .text
+                    .lines()
+                    .take(PREVIEW_LINES)
+                    .map(str::to_owned)
+                    .collect(),
+            });
         }
-        Ok(hits)
-    })
-    .await
-    .map_err(|error| IndexError::Join(error.to_string()))?
+    }
+    Ok(hits)
 }
 
 #[cfg(test)]

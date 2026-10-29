@@ -454,6 +454,8 @@ async fn execute(core: &Arc<Core>, work: Work) -> Response {
     }
 }
 
+/// Spans admission, the wait for a lane worker and the work itself: the daemon-side latency of one request.
+#[proxima::instrument]
 async fn submit(front: &SinkFront<Job>, wake: &Notify, work: Work) -> Result<Response, DropReason> {
     let (reply, answer) = oneshot::channel();
     let admission = front.emit(Job { work, reply });
