@@ -1,0 +1,40 @@
+[package]
+name = "ss"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+blake3 = "1.8.7"
+clap = { version = "4.6.7", features = ["derive"] }
+dirs = "7.0.0"
+fastembed = "7.5.0"
+futures = "0.3.34"
+ignore = "0.4.34"
+interprocess = { version = "2.4.7", features = ["tokio"] }
+notify = "8.2.1"
+proxima = { version = "0.1.0", path = "../../../slot-0/proxima", package = "proxima-lib", default-features = false, features = ["macros", "runtime-tokio", "tokio"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+ss-proto = { version = "0.1.0", path = "../ss-proto" }
+thiserror = "2.0.21"
+thread-priority = "3.1.1"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "io-util", "fs", "process"] }
+tree-sitter = "0.27.1"
+tree-sitter-go = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proxima = { path = "../../../slot-0/proxima", package = "proxima-lib", default-features = false, features = ["test-support", "runtime-tokio", "tokio"] }
+tempfile = "3.27.0"
+
+[target."cfg(unix)".dependencies]
+rustix = { version = "1.1.6", features = ["process"] }

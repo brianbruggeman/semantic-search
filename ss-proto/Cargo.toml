@@ -1,0 +1,13 @@
+[package]
+name = "ss-proto"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0.154", default-features = false, features = ["alloc"] }
+thiserror = { version = "2.0.21", default-features = false }
+
+[lints]
+workspace = true
