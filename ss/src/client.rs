@@ -18,6 +18,8 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub enum ClientError {
     #[error("daemon did not become ready within {0} ms")]
     NotReady(u64),
+    #[error("the daemon did not reply within {0} ms")]
+    TimedOut(u64),
     #[error("could not start the daemon: {0}")]
     Spawn(io::Error),
     #[error("connection failed: {0}")]
@@ -59,7 +61,22 @@ impl Client {
 
     async fn exchange_spawning(&self, request: &Request) -> Result<Response, ClientError> {
         let stream = self.connect_or_spawn().await?;
-        exchange(stream, request).await
+        let limit_ms = self.reply_limit_ms(request);
+        if limit_ms == 0 {
+            return exchange(stream, request).await;
+        }
+        tokio::time::timeout(Duration::from_millis(limit_ms), exchange(stream, request))
+            .await
+            .map_err(|_| ClientError::TimedOut(limit_ms))?
+    }
+
+    /// An index run legitimately lasts as long as the tree is large, so only requests that answer from existing
+    /// state are bounded. Zero means unbounded.
+    fn reply_limit_ms(&self, request: &Request) -> u64 {
+        match request {
+            Request::Index { .. } => 0,
+            _ => self.settings.request_timeout_ms,
+        }
     }
 
     async fn connect_or_spawn(&self) -> Result<Stream, ClientError> {
@@ -116,5 +133,38 @@ async fn exchange(mut stream: Stream, request: &Request) -> Result<Response, Cli
             return Err(ClientError::Closed);
         }
         decoder.push(&chunk[..read]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ss_ipc::{ListenerExt as _, listen};
+
+    use super::*;
+
+    #[proxima::test(runtime = "tokio")]
+    async fn a_daemon_that_accepts_but_never_replies_times_out_instead_of_hanging_the_client() {
+        let home = tempfile::tempdir().expect("home");
+        let settings = Settings {
+            request_timeout_ms: 200,
+            ..Settings::load().expect("defaults")
+        }
+        .with_home(home.path());
+        let listener = listen(&settings.endpoint()).expect("listen");
+        let silent = tokio::spawn(async move {
+            let held = listener.accept().await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            held
+        });
+        let started = Instant::now();
+
+        let outcome = Client::new(settings).send(Request::Status).await;
+
+        silent.abort();
+        assert!(
+            matches!(outcome, Err(ClientError::TimedOut(200))),
+            "{outcome:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

@@ -50,6 +50,9 @@ pub struct Settings {
     /// How long a client waits for a freshly spawned daemon to accept connections
     #[setting(default = 15000)]
     pub spawn_timeout_ms: u64,
+    /// How long a client waits for the reply to a search, status or watch request before giving up; zero waits forever. Index requests are never bounded
+    #[setting(default = 30000)]
+    pub request_timeout_ms: u64,
     /// Quiet time after a file event before the batch is indexed
     #[setting(default = 200)]
     pub debounce_ms: u64,
