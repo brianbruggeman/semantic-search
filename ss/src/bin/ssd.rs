@@ -69,7 +69,9 @@ fn fail(message: &str) -> ExitCode {
 }
 
 async fn serve(settings: Settings) -> Result<ExitCode, String> {
+    let recorder = ss::telemetry::init(&settings).map_err(|error| format!("telemetry: {error}"))?;
     let outcome = run(settings, None).await.map_err(|error| error.to_string());
+    recorder.drain();
     match outcome? {
         RunOutcome::AlreadyRunning | RunOutcome::Stopped => Ok(ExitCode::SUCCESS),
     }

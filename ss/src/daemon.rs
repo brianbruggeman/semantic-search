@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use proxima::pipe::Pipe;
-use proxima::telemetry::warn;
+use proxima::telemetry::{info, warn};
 use ss_ipc::{InstanceLock, ListenerExt as _, Stream, listen};
 use ss_proto::{
     DaemonStatus, ErrorKind, Frame, Hit, IndexStats, LineDecoder, Request, Response, encode_frame,
@@ -120,6 +120,14 @@ impl Core {
     }
 
     fn record(&self, stats: &IndexStats) {
+        crate::telemetry::record_index_default(stats);
+        info!(
+            "index run complete",
+            chunks_seen = stats.chunks_seen,
+            chunks_embedded = stats.chunks_embedded,
+            chunks_skipped = stats.chunks_skipped,
+            files_indexed = stats.files_indexed
+        );
         self.totals
             .seen
             .fetch_add(stats.chunks_seen, Ordering::Relaxed);

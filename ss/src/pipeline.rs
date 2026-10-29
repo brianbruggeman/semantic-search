@@ -113,6 +113,7 @@ fn relative(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
+#[proxima::instrument]
 fn read_file(
     root: &Path,
     config: &StoreConfig,
@@ -206,6 +207,7 @@ impl Pipe for Chunk {
     }
 }
 
+#[proxima::instrument]
 fn chunk_flow(input: Flow<SourceFile>) -> Flow<FileChunks> {
     let source = match input {
         Flow::Done(done) => return Flow::Done(done),
@@ -273,6 +275,7 @@ impl Pipe for Embed {
     }
 }
 
+#[proxima::instrument]
 async fn unseen_texts(
     config: &Arc<StoreConfig>,
     chunks: &[RawChunk],
@@ -332,6 +335,7 @@ impl Pipe for StoreFile {
     }
 }
 
+#[proxima::instrument]
 fn store_file(config: &StoreConfig, file: &EmbeddedFile) -> Result<FileReport, IndexError> {
     let stats = file_stats(file);
     Store::open(config)?.replace_file(&file.rel, &file.row, &file.chunks, &file.fresh)?;

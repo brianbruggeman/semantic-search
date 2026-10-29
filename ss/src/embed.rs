@@ -130,6 +130,7 @@ where
     slot.as_mut().ok_or(EmbedError::PoolClosed)
 }
 
+#[proxima::instrument]
 fn embed_checked<Model>(model: &mut Model, texts: &[String]) -> EmbedOutput
 where
     Model: FnMut(&[String]) -> EmbedOutput,

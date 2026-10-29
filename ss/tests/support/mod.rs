@@ -119,6 +119,26 @@ impl Env {
         begun.elapsed()
     }
 
+    /// With `SS_TEST_LOG_DIR` set, copies the daemon's log files out before the temp home is deleted.
+    fn keep_logs(&self) {
+        let Some(target) = std::env::var_os("SS_TEST_LOG_DIR") else {
+            return;
+        };
+        let name = std::thread::current()
+            .name()
+            .unwrap_or("test")
+            .replace("::", "_");
+        let destination = PathBuf::from(target).join(name);
+        let _ = std::fs::create_dir_all(&destination);
+        for entry in std::fs::read_dir(self.home.path().join("logs"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let _ = std::fs::copy(entry.path(), destination.join(entry.file_name()));
+        }
+    }
+
     pub fn stop_daemon(&self) {
         let _ = self.command("ssd").arg("stop").output();
     }
@@ -151,5 +171,6 @@ pub async fn wait_until_listening(client: &Client) {
 impl Drop for Env {
     fn drop(&mut self) {
         self.stop_daemon();
+        self.keep_logs();
     }
 }
