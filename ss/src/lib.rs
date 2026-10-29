@@ -13,6 +13,7 @@ pub mod registry;
 pub mod settings;
 pub mod store;
 pub mod walk;
+pub mod watch;
 
 #[cfg(test)]
 mod fixtures;

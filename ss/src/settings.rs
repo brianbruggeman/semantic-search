@@ -43,6 +43,15 @@ pub struct Settings {
     /// Quiet time after a file event before the batch is indexed
     #[setting(default = 200)]
     pub debounce_ms: u64,
+    /// Watch backend: `native` (OS file events) or `poll` (stat polling, for network drives and containers)
+    #[setting(default_str = "native")]
+    pub watch_backend: String,
+    /// Stat-polling interval for the `poll` backend
+    #[setting(default = 500)]
+    pub watch_poll_ms: u64,
+    /// Seconds of event silence after which a watched root is fully rescanned anyway; zero disables
+    #[setting(default = 300)]
+    pub rescan_secs: u64,
     /// Path to the `ssd` binary; empty selects the sibling of the running executable
     #[setting(default_str = "")]
     pub daemon_bin: String,

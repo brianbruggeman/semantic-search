@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use proxima::pipe::Pipe;
+use proxima::telemetry::warn;
 use ss_ipc::{InstanceLock, ListenerExt as _, Stream, listen};
 use ss_proto::{
     DaemonStatus, ErrorKind, Frame, Hit, IndexStats, LineDecoder, Request, Response, encode_frame,
@@ -17,10 +18,11 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use crate::admit::{Admit, AdmitError, AdmitGauge};
 use crate::embed::{EmbedPool, EmbedderKind, hash_embed, load_fastembed};
 use crate::error::IndexError;
-use crate::index::{Shard, index_tree};
+use crate::index::{Shard, index_changed, index_tree};
 use crate::query::search;
-use crate::registry::Registry;
+use crate::registry::{Registry, WatchChange};
 use crate::settings::Settings;
+use crate::watch::{Batch, WatchHub};
 
 const READ_CHUNK: usize = 8192;
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
@@ -68,6 +70,7 @@ struct Entry {
 /// State shared by every connection: one set of indexes, one registry, one embed pool.
 pub struct Core {
     settings: Settings,
+    hub: WatchHub,
     pool: EmbedPool,
     registry: Mutex<Registry>,
     shards: Mutex<HashMap<PathBuf, Arc<Entry>>>,
@@ -82,6 +85,7 @@ impl Core {
     fn new(settings: Settings, pool: EmbedPool, registry: Registry) -> Self {
         Self {
             settings,
+            hub: WatchHub::default(),
             pool,
             registry: Mutex::new(registry),
             shards: Mutex::default(),
@@ -183,7 +187,7 @@ impl Core {
             uptime_secs: self.started.elapsed().as_secs(),
             roots: paths(&registry.roots),
             watches: paths(&registry.watches),
-            active_watchers: 0,
+            active_watchers: self.hub.count().await as u64,
             queries_running: search.running() as u64,
             queries_waiting: search.waiting() as u64,
             queries_busy: search.rejected(),
@@ -191,6 +195,104 @@ impl Core {
             chunks_seen: self.totals.seen.load(Ordering::Relaxed),
             chunks_embedded: self.totals.embedded.load(Ordering::Relaxed),
             chunks_skipped: self.totals.skipped.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl Core {
+    pub(crate) fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub(crate) async fn root_of(&self, path: &Path) -> Option<PathBuf> {
+        self.registry
+            .lock()
+            .await
+            .resolve(path)
+            .map(Path::to_path_buf)
+    }
+
+    /// Indexes one debounced batch of watcher hints under the root's single-writer lock.
+    pub(crate) async fn apply_batch(
+        &self,
+        watch: &Path,
+        batch: Batch,
+    ) -> Result<IndexStats, ServeError> {
+        let root = self
+            .root_of(watch)
+            .await
+            .unwrap_or_else(|| watch.to_path_buf());
+        let entry = self.entry(&root).await;
+        let _serialized = entry.writer.lock().await;
+        let stats = if batch.rescan {
+            index_tree(&entry.shard, watch).await?
+        } else {
+            index_changed(&entry.shard, batch.paths.into_iter().collect()).await?
+        };
+        self.record(&stats);
+        Ok(stats)
+    }
+
+    /// Registers `path` as a watched root and starts its watcher; repeats and nested paths change nothing.
+    async fn watch_add(self: &Arc<Self>, path: &Path) -> Result<Vec<String>, ServeError> {
+        let canonical = canonical_dir(path)?;
+        let (change, absorbed_roots) = {
+            let mut registry = self.registry.lock().await;
+            let absorbed_roots = if registry.resolve(&canonical).is_some() {
+                Vec::new()
+            } else {
+                registry.add_root(&canonical)
+            };
+            let change = registry.add_watch(&canonical);
+            registry.save(&self.settings.state_path())?;
+            (change, absorbed_roots)
+        };
+        self.forget_shards(&absorbed_roots).await;
+        if let WatchChange::Added { absorbed } = change {
+            for nested in &absorbed {
+                self.hub.stop(nested).await;
+            }
+            self.hub.start(self, &canonical).await.map_err(|error| {
+                ServeError::BadRequest(format!("cannot watch {}: {error}", canonical.display()))
+            })?;
+        }
+        Ok(self.watch_list().await)
+    }
+
+    async fn watch_rm(&self, path: &Path) -> Result<Vec<String>, ServeError> {
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let removed = {
+            let mut registry = self.registry.lock().await;
+            let removed = registry.rm_watch(&canonical);
+            registry.save(&self.settings.state_path())?;
+            removed
+        };
+        if !removed {
+            return Err(ServeError::BadRequest(format!(
+                "{} is not watched",
+                canonical.display()
+            )));
+        }
+        self.hub.stop(&canonical).await;
+        Ok(self.watch_list().await)
+    }
+
+    async fn watch_list(&self) -> Vec<String> {
+        let registry = self.registry.lock().await;
+        registry
+            .watches
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect()
+    }
+
+    /// Daemon start: every registered watch gets its watcher back, and its startup rescan is the first batch.
+    async fn resume_watches(self: &Arc<Self>) {
+        let watches = self.registry.lock().await.watches.clone();
+        for path in watches {
+            if let Err(error) = self.hub.start(self, &path).await {
+                warn!("cannot resume watch", path = %path.display(), error = %error);
+            }
         }
     }
 }
@@ -305,13 +407,22 @@ impl Pipe for Router {
                 self.core.shutdown.notify_one();
                 Response::Ok
             }
-            Request::WatchAdd { .. } | Request::WatchRm { .. } | Request::WatchList => {
-                Response::Error {
-                    error: ErrorKind::BadRequest,
-                    message: "watch folders are not available in this build".to_owned(),
-                }
-            }
+            Request::WatchAdd { path } => watch_reply(self.core.watch_add(Path::new(&path)).await),
+            Request::WatchRm { path } => watch_reply(self.core.watch_rm(Path::new(&path)).await),
+            Request::WatchList => Response::Watches {
+                paths: self.core.watch_list().await,
+            },
         })
+    }
+}
+
+fn watch_reply(outcome: Result<Vec<String>, ServeError>) -> Response {
+    match outcome {
+        Ok(paths) => Response::Watches { paths },
+        Err(error) => Response::Error {
+            error: error.kind(),
+            message: error.to_string(),
+        },
     }
 }
 
@@ -354,6 +465,7 @@ pub async fn run(settings: Settings, pool: Option<EmbedPool>) -> Result<RunOutco
     let pool = pool.unwrap_or_else(|| build_pool(&settings));
     let core = Arc::new(Core::new(settings, pool, registry));
     let router = Arc::new(Router::new(&core));
+    core.resume_watches().await;
     tokio::spawn(idle_monitor(Arc::clone(&core)));
     loop {
         tokio::select! {

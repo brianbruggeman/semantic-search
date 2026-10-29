@@ -10,6 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::settings::Settings;
 
 const RETRY_PAUSE: Duration = Duration::from_millis(25);
+const RESPAWN_EVERY: Duration = Duration::from_secs(1);
 const READ_CHUNK: usize = 8192;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -66,16 +67,26 @@ impl Client {
         if let Ok(stream) = connect(&endpoint).await {
             return Ok(stream);
         }
-        spawn_detached(&self.settings.daemon_executable(), &["serve", "--setsid"])
-            .map_err(ClientError::Spawn)?;
         let deadline = Instant::now() + Duration::from_millis(self.settings.spawn_timeout_ms);
+        let mut last_spawn = None::<Instant>;
         loop {
+            if last_spawn.is_none_or(|at| at.elapsed() >= RESPAWN_EVERY) {
+                self.spawn_daemon()?;
+                last_spawn = Some(Instant::now());
+            }
             match connect(&endpoint).await {
                 Ok(stream) => return Ok(stream),
                 Err(_) if Instant::now() < deadline => tokio::time::sleep(RETRY_PAUSE).await,
                 Err(_) => return Err(ClientError::NotReady(self.settings.spawn_timeout_ms)),
             }
         }
+    }
+
+    /// Spawning is idempotent: a daemon that loses the instance lock exits at once. Repeating it covers a
+    /// predecessor that was still shutting down (holding the lock) when the first attempt started.
+    fn spawn_daemon(&self) -> Result<(), ClientError> {
+        spawn_detached(&self.settings.daemon_executable(), &["serve", "--setsid"])
+            .map_err(ClientError::Spawn)
     }
 }
 

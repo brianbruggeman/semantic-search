@@ -25,7 +25,7 @@ beyond the queue depth, one watch registry serves all callers, a crashed client 
   so the daemon runs on the tokio fallback. Pure stages (chunker, fusion, codec) are runtime-free and tested on prime.
 
 ## process model
-- State dir: `<cache_dir>/ss` (override `SS_HOME`): `ssd.lock`, `ssd.sock` (unix), `watches.json`, `logs/`,
+- State dir: `<cache_dir>/ss` (override `SS_HOME`): `ssd.lock`, `ssd.sock` (unix), `state.json`, `logs/`,
   `roots/<blake3(root)[..16]>/index.db` (SQLite: vectors, chunks, FTS5, file table).
 - Client: connect; on failure spawn `ssd serve` detached (stdio null; unix: the child calls `setsid` first thing;
   Windows: `DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`), then poll connect with a bounded
@@ -59,9 +59,14 @@ complete frames; no IO in the crate. Responses may arrive out of order; the id p
   has N low-priority threads and two lanes (query lane drained first) so an index flood cannot starve queries.
 
 ## watch
-`ssd watch add` persists to `watches.json`, rescans by mtime+hash, then runs `notify` with ~200 ms debounce and
-`ignore` filtering into the same pipeline. Adding an already-watched or nested path is a no-op (nested paths are
-covered by the ancestor). Watcher error/overflow triggers a full hash rescan. Events are hints; the rescan is truth.
+`ssd watch add` persists to `state.json`, starts the watcher, then its first batch is a full mtime+hash rescan; later
+events are debounced (200 ms), filtered (hidden, root `.gitignore`/`.ignore`, the state dir) and fed to the same
+pipeline (`index_changed`). Adding an already-watched or nested path is a no-op (nested paths are covered by the
+ancestor; a parent absorbs child watches). Watcher error/overflow, or `rescan_secs` (default 300) of event silence,
+triggers a full rescan: events are hints, the rescan is truth. Backend is `native` (OS events) or `poll` (stat
+polling) via `SS_WATCH_BACKEND`; macOS FSEvents was observed to deliver late or not at all under load, which is why
+the safety rescan exists and why most watch tests use `poll`. Nested `.gitignore` files are honored by the walk
+(rescan) but not by the event filter.
 
 ## designs abandoned
 Per-invocation embedding in the CLI (violates no-heavy-work); a trait for the embedder (it is a pipe); one

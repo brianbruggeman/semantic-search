@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -118,7 +119,11 @@ fn read_file(
     path: &Path,
 ) -> Result<Flow<SourceFile>, IndexError> {
     let rel = relative(root, path);
-    let meta = std::fs::metadata(path)?;
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == ErrorKind::NotFound => return forget_vanished(config, &rel),
+        Err(error) => return Err(error.into()),
+    };
     if meta.len() > MAX_FILE_BYTES {
         return Ok(Flow::Done(report(
             &rel,
@@ -164,6 +169,19 @@ fn read_file(
             hash,
         },
     }))
+}
+
+/// A file that vanished between the walk and the read is a normal race, not a failure: drop its rows.
+fn forget_vanished(config: &StoreConfig, rel: &str) -> Result<Flow<SourceFile>, IndexError> {
+    let store = Store::open(config)?;
+    let removed = u64::from(store.remove_file(rel)? > 0);
+    Ok(Flow::Done(report(
+        rel,
+        IndexStats {
+            files_removed: removed,
+            ..IndexStats::default()
+        },
+    )))
 }
 
 fn decode_text(bytes: Vec<u8>) -> Option<String> {
@@ -309,19 +327,15 @@ impl Pipe for StoreFile {
                 Flow::Done(done) => return Ok(done),
                 Flow::Next(file) => file,
             };
-            blocking(move || {
-                let stats = file_stats(&file);
-                Store::open(&config)?.replace_file(
-                    &file.rel,
-                    &file.row,
-                    &file.chunks,
-                    &file.fresh,
-                )?;
-                Ok(report(&file.rel, stats))
-            })
-            .await
+            blocking(move || store_file(&config, &file)).await
         }
     }
+}
+
+fn store_file(config: &StoreConfig, file: &EmbeddedFile) -> Result<FileReport, IndexError> {
+    let stats = file_stats(file);
+    Store::open(config)?.replace_file(&file.rel, &file.row, &file.chunks, &file.fresh)?;
+    Ok(report(&file.rel, stats))
 }
 
 fn file_stats(file: &EmbeddedFile) -> IndexStats {

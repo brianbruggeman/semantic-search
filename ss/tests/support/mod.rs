@@ -58,6 +58,9 @@ pub struct Env {
     pub home: TempDir,
     pub work: TempDir,
     pub idle_secs: String,
+    pub watch_backend: String,
+    pub rescan_secs: String,
+    pub poll_ms: String,
 }
 
 impl Env {
@@ -66,6 +69,9 @@ impl Env {
             home: tempfile::tempdir().expect("home"),
             work: tempfile::tempdir().expect("work"),
             idle_secs: "600".to_owned(),
+            watch_backend: "poll".to_owned(),
+            rescan_secs: "0".to_owned(),
+            poll_ms: "200".to_owned(),
         }
     }
 
@@ -85,6 +91,9 @@ impl Env {
         command
             .env("SS_HOME", self.home.path())
             .env("SS_EMBEDDER", "hash")
+            .env("SS_WATCH_BACKEND", &self.watch_backend)
+            .env("SS_RESCAN_SECS", &self.rescan_secs)
+            .env("SS_WATCH_POLL_MS", &self.poll_ms)
             .env("SS_DAEMON_BIN", env!("CARGO_BIN_EXE_ssd"))
             .env("SS_IDLE_SECS", &self.idle_secs)
             .current_dir(self.work.path());

@@ -56,30 +56,44 @@ pub async fn index_tree(shard: &Shard, scope: &Path) -> Result<IndexStats, Index
     let files = Walk::new(scope).call(()).await?;
     let present: HashSet<String> = files.iter().map(|path| rel_of(&shard.root, path)).collect();
     let mut stats = run_pipeline(shard, files).await?;
-    stats.files_removed = remove_vanished(shard, scope, &present).await?;
+    stats.files_removed += remove_vanished(shard, scope, &present).await?;
     Ok(stats)
 }
 
-/// Applies watcher hints: existing paths flow through the pipeline, missing ones are dropped from the store.
+/// Applies watcher hints: files flow through the pipeline, new directories are walked, and paths that no
+/// longer exist (a file or a whole directory) are dropped from the store.
 #[proxima::instrument]
 pub async fn index_changed(shard: &Shard, paths: Vec<PathBuf>) -> Result<IndexStats, IndexError> {
     let (present, gone): (Vec<PathBuf>, Vec<PathBuf>) =
-        paths.into_iter().partition(|path| path.is_file());
-    let mut stats = run_pipeline(shard, present).await?;
+        paths.into_iter().partition(|path| path.exists());
+    let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) =
+        present.into_iter().partition(|path| path.is_dir());
+    let mut stats = run_pipeline(shard, files).await?;
+    for dir in dirs {
+        stats.absorb(index_tree(shard, &dir).await?);
+    }
     let config = Arc::clone(&shard.config);
     let rels: Vec<String> = gone.iter().map(|path| rel_of(&shard.root, path)).collect();
-    stats.files_removed = tokio::task::spawn_blocking(move || -> Result<u64, IndexError> {
-        let store = Store::open(&config)?;
-        let mut removed = 0;
-        for rel in rels {
-            removed += u64::from(store.remove_file(&rel)? > 0);
-        }
-        store.gc_vectors()?;
-        Ok(removed)
-    })
-    .await
-    .map_err(|error| IndexError::Join(error.to_string()))??;
+    stats.files_removed += tokio::task::spawn_blocking(move || remove_gone(&config, &rels))
+        .await
+        .map_err(|error| IndexError::Join(error.to_string()))??;
     Ok(stats)
+}
+
+fn remove_gone(config: &StoreConfig, rels: &[String]) -> Result<u64, IndexError> {
+    let store = Store::open(config)?;
+    let mut removed = 0;
+    for path in store.file_paths()? {
+        let vanished = rels
+            .iter()
+            .any(|rel| path == *rel || path.starts_with(&format!("{rel}/")));
+        if vanished {
+            store.remove_file(&path)?;
+            removed += 1;
+        }
+    }
+    store.gc_vectors()?;
+    Ok(removed)
 }
 
 fn rel_of(root: &Path, path: &Path) -> String {
@@ -250,5 +264,37 @@ mod tests {
             !files.is_empty() && !files.iter().any(|path| path == "src/walk.rs"),
             "files={files:?} stats={stats:?}"
         );
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn changed_hints_index_a_new_file_and_drop_a_deleted_directory() {
+        let corpus = own_src_corpus(&hash_pool(), EmbedderKind::Hash);
+        index_tree(&corpus.shard, &corpus.root())
+            .await
+            .expect("first index");
+        let before = corpus.chunk_count();
+        let fresh = corpus.root().join("src/fresh_hint.rs");
+        std::fs::write(&fresh, "pub fn fresh_hint() -> u32 {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    a + b + c\n}\n").expect("write");
+
+        let added = index_changed(&corpus.shard, vec![fresh])
+            .await
+            .expect("hint for new file");
+        let with_fresh = corpus.chunk_count();
+        std::fs::remove_dir_all(corpus.root().join("src")).expect("delete tree");
+        let removed = index_changed(&corpus.shard, vec![corpus.root().join("src")])
+            .await
+            .expect("hint for deleted dir");
+
+        assert_eq!((added.files_indexed, added.chunks_embedded), (1, 1));
+        assert!(
+            with_fresh > before,
+            "before={before} with_fresh={with_fresh}"
+        );
+        assert!(
+            removed.files_removed > 1,
+            "removed={}",
+            removed.files_removed
+        );
+        assert_eq!(corpus.chunk_count(), 0);
     }
 }

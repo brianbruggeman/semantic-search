@@ -69,10 +69,8 @@ fn fail(message: &str) -> ExitCode {
 }
 
 async fn serve(settings: Settings) -> Result<ExitCode, String> {
-    match run(settings, None)
-        .await
-        .map_err(|error| error.to_string())?
-    {
+    let outcome = run(settings, None).await.map_err(|error| error.to_string());
+    match outcome? {
         RunOutcome::AlreadyRunning | RunOutcome::Stopped => Ok(ExitCode::SUCCESS),
     }
 }
