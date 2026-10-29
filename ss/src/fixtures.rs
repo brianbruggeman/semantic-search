@@ -46,12 +46,26 @@ pub fn copy_dir(from: &Path, to: &Path) {
 
 /// The repo's own `src` copied into a temp tree, with a shard wired to `pool`.
 pub fn own_src_corpus(pool: &EmbedPool, kind: EmbedderKind) -> Corpus {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    corpus_from(pool, kind, |root| copy_dir(&source, &root.join("src")))
+}
+
+/// Only the named files of the repo's own `src`: real code, but few enough chunks for a real-model index to be quick.
+pub fn own_src_files(pool: &EmbedPool, kind: EmbedderKind, names: &[&str]) -> Corpus {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    corpus_from(pool, kind, |root| {
+        std::fs::create_dir_all(root.join("src")).expect("create src dir");
+        for name in names {
+            std::fs::copy(source.join(name), root.join("src").join(name))
+                .expect("copy source file");
+        }
+    })
+}
+
+fn corpus_from(pool: &EmbedPool, kind: EmbedderKind, fill: impl FnOnce(&Path)) -> Corpus {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("tree");
-    copy_dir(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &root.join("src"),
-    );
+    fill(&root);
     let config = StoreConfig {
         dir: dir.path().join("shard"),
         model_id: kind.model_id().to_owned(),

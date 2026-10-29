@@ -110,7 +110,7 @@ fn render_hits(
 mod tests {
     use super::*;
     use crate::embed::EmbedderKind;
-    use crate::fixtures::{fastembed_pool, hash_pool, own_src_corpus};
+    use crate::fixtures::{fastembed_pool, hash_pool, own_src_corpus, own_src_files};
     use crate::index::index_tree;
 
     #[test]
@@ -222,7 +222,17 @@ mod tests {
     async fn real_model_puts_the_walker_chunk_in_the_top_three_for_the_gitignore_query() {
         let cache = tempfile::tempdir().expect("model cache dir");
         let pool = fastembed_pool(cache.path().to_path_buf());
-        let corpus = own_src_corpus(&pool, EmbedderKind::FastEmbed);
+        let corpus = own_src_files(
+            &pool,
+            EmbedderKind::FastEmbed,
+            &[
+                "walk.rs",
+                "watch.rs",
+                "registry.rs",
+                "error.rs",
+                "settings.rs",
+            ],
+        );
         let started = std::time::Instant::now();
         let stats = index_tree(&corpus.shard, &corpus.root())
             .await
