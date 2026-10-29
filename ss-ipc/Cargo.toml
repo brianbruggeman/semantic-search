@@ -1,0 +1,23 @@
+[package]
+name = "ss-ipc"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+interprocess = { version = "2.4.7", features = ["tokio"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["net", "io-util", "rt", "time"] }
+
+[lints]
+workspace = true
+
+[target."cfg(unix)".dependencies]
+rustix = { version = "1.1.6", features = ["process"] }
+
+[target."cfg(windows)".dependencies]
+widestring = "1.2.1"
+
+[dev-dependencies]
+proxima = { path = "../../../slot-0/proxima", package = "proxima-lib", default-features = false, features = ["test-support", "tokio"] }
+tempfile = "3.27.0"
