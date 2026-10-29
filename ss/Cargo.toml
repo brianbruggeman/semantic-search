@@ -36,6 +36,7 @@ tree-sitter-typescript = "0.23.2"
 workspace = true
 
 [dev-dependencies]
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["coreml"] }
 proxima = { path = "../../../slot-0/proxima", package = "proxima-lib", default-features = false, features = ["test-support", "runtime-tokio", "tokio"] }
 temp-env = "0.3.6"
 tempfile = "3.27.0"

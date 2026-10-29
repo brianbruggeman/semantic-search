@@ -4355,6 +4355,7 @@ dependencies = [
  "futures",
  "ignore",
  "notify",
+ "ort",
  "proxima-lib",
  "proxima-telemetry",
  "rusqlite",

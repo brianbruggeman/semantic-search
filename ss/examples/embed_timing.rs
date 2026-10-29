@@ -10,9 +10,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use fastembed::{
-    InitOptionsUserDefined, Pooling, QuantizationMode, TextEmbedding, TokenizerFiles,
-    UserDefinedEmbeddingModel,
+    ExecutionProviderDispatch, InitOptionsUserDefined, Pooling, QuantizationMode, TextEmbedding,
+    TokenizerFiles, UserDefinedEmbeddingModel,
 };
+use ort::ep::CoreML;
+use ort::ep::coreml::{ComputeUnits, ModelFormat};
 use ss::chunk::{Language, chunk_source};
 use thread_priority::{ThreadPriority, set_current_thread_priority};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
@@ -27,6 +29,7 @@ struct Config {
     low_priority: bool,
     sorted: bool,
     model: String,
+    provider: String,
 }
 
 fn arg<T: std::str::FromStr>(position: usize, default: T) -> T {
@@ -44,6 +47,7 @@ fn config() -> Config {
         low_priority: arg(4, "min".to_owned()) == "min",
         sorted: arg(5, "file".to_owned()) == "sorted",
         model: arg(6, "model.onnx".to_owned()),
+        provider: arg(7, "cpu".to_owned()),
     }
 }
 
@@ -101,6 +105,21 @@ fn read_files(dir: &Path, model_name: &str) -> (Vec<u8>, TokenizerFiles) {
     (read(&format!("onnx/{model_name}")), files)
 }
 
+fn providers(name: &str) -> Vec<ExecutionProviderDispatch> {
+    let units = match name {
+        "coreml_all" => ComputeUnits::All,
+        "coreml_gpu" => ComputeUnits::CPUAndGPU,
+        "coreml_ane" => ComputeUnits::CPUAndNeuralEngine,
+        _ => return Vec::new(),
+    };
+    vec![
+        CoreML::default()
+            .with_compute_units(units)
+            .with_model_format(ModelFormat::MLProgram)
+            .build(),
+    ]
+}
+
 fn build_engine(dir: &Path, config: &Config) -> TextEmbedding {
     let (onnx, files) = read_files(dir, &config.model);
     let model = UserDefinedEmbeddingModel::new(onnx, files)
@@ -110,7 +129,8 @@ fn build_engine(dir: &Path, config: &Config) -> TextEmbedding {
         model,
         InitOptionsUserDefined::new()
             .with_max_length(config.max_length)
-            .with_intra_threads(config.threads),
+            .with_intra_threads(config.threads)
+            .with_execution_providers(providers(&config.provider)),
     )
     .expect("engine")
 }
@@ -192,13 +212,14 @@ fn main() {
         .collect();
 
     println!(
-        "threads={} batch={} max_length={} priority={} order={} model={} chunks={} padded_tokens={padded_tokens}",
+        "threads={} batch={} max_length={} priority={} order={} model={} provider={} chunks={} padded_tokens={padded_tokens}",
         config.threads,
         config.batch,
         config.max_length,
         if config.low_priority { "min" } else { "normal" },
         if config.sorted { "sorted" } else { "file" },
         config.model,
+        config.provider,
         texts.len(),
     );
     println!(

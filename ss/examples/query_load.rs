@@ -31,7 +31,7 @@ impl Rig {
             .env("SS_EMBEDDER", &self.embedder)
             .env("SS_DAEMON_BIN", &self.ssd)
             .env("SS_IDLE_SECS", "900")
-            .env("RUST_LOG", "warn,ss=info")
+            .env("RUST_LOG", "warn,ss=debug")
             .current_dir(&self.tree);
         command
     }
