@@ -7,10 +7,19 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use support::{Env, percentile, tagged_copies, text};
+use support::{Env, percentile, run_bounded, tagged_copies, text};
 
 fn index_root(env: &Env) -> std::process::Output {
     env.run("ss", &["index", env.root().to_str().expect("utf8")])
+}
+
+#[test]
+#[should_panic(expected = "still running after")]
+fn a_child_that_never_exits_fails_the_test_instead_of_hanging_it() {
+    run_bounded(
+        std::process::Command::new("sleep").arg("30"),
+        Duration::from_millis(300),
+    );
 }
 
 #[proxima::test(runtime = "tokio")]

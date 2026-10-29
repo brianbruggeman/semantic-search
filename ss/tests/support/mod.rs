@@ -2,8 +2,10 @@
 #![allow(dead_code, clippy::expect_used, clippy::unwrap_used)]
 
 use std::fmt::Write as _;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use ss::client::Client;
@@ -101,10 +103,7 @@ impl Env {
     }
 
     pub fn run(&self, binary: &str, args: &[&str]) -> Output {
-        self.command(binary)
-            .args(args)
-            .output()
-            .expect("run binary")
+        run_bounded(self.command(binary).args(args), CHILD_BOUND)
     }
 
     pub fn run_timed(&self, args: &[&str]) -> Duration {
@@ -164,6 +163,52 @@ impl Env {
     pub fn root(&self) -> PathBuf {
         self.work.path().join("tree")
     }
+}
+
+/// No test child legitimately runs this long; a client waiting on a daemon forever must fail the test.
+const CHILD_BOUND: Duration = Duration::from_secs(60);
+
+/// Like `Command::output` but kills the child and panics with whatever it printed once `bound` passes.
+pub fn run_bounded(command: &mut Command, bound: Duration) -> Output {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn child");
+    let stdout = collect(child.stdout.take());
+    let stderr = collect(child.stderr.take());
+    let deadline = Instant::now() + bound;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll child") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "{command:?} still running after {bound:?}; stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&stdout.join().unwrap_or_default()),
+                String::from_utf8_lossy(&stderr.join().unwrap_or_default())
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    }
+}
+
+fn collect(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut reader) = pipe {
+            let _ = reader.read_to_end(&mut bytes);
+        }
+        bytes
+    })
 }
 
 pub fn text(output: &Output) -> String {
