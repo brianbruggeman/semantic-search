@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use proxima::telemetry::debug;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::chunk::{ChunkKey, RawChunk};
 use crate::error::IndexError;
@@ -78,6 +78,12 @@ impl Store {
             [model_id],
         )?;
         Ok(())
+    }
+
+    /// Pins one WAL snapshot for every read until the guard drops, so a search's scan, text match and chunk fetch
+    /// agree even while a re-index replaces rows; without it each statement saw a different database.
+    pub fn read_snapshot(&self) -> rusqlite::Result<Transaction<'_>> {
+        self.conn.unchecked_transaction()
     }
 
     pub fn set_root(&self, root: &Path) -> rusqlite::Result<()> {

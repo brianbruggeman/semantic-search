@@ -74,6 +74,7 @@ fn scan(
     limit: usize,
 ) -> Result<Vec<Hit>, IndexError> {
     let store = Store::open(config)?;
+    let _snapshot = store.read_snapshot()?;
     let by_vector = store.vector_search(embedding, prefix, CANDIDATES)?;
     let by_text = store.text_search(terms, prefix, CANDIDATES)?;
     render_hits(&store, root, &rrf_fuse(&[by_vector, by_text]), limit)
@@ -108,10 +109,14 @@ fn render_hits(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+
     use super::*;
-    use crate::embed::EmbedderKind;
+    use crate::chunk::{Language, chunk_source};
+    use crate::embed::{EmbedderKind, hash_embed};
     use crate::fixtures::{fastembed_pool, hash_pool, own_src_corpus, own_src_files};
     use crate::index::index_tree;
+    use crate::store::FileRow;
 
     #[test]
     fn rrf_rewards_agreement_between_rankings() {
@@ -216,6 +221,74 @@ mod tests {
             .expect("search");
 
         assert_eq!(hits.len(), 0);
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn a_search_never_comes_back_empty_because_a_reindex_replaced_its_chunks_mid_query() {
+        let corpus = own_src_files(&hash_pool(), EmbedderKind::Hash, &["walk.rs"]);
+        index_tree(&corpus.shard, &corpus.root())
+            .await
+            .expect("index");
+        let config = Arc::clone(&corpus.shard.config);
+        let text = std::fs::read_to_string(corpus.root().join("src/walk.rs")).expect("walk.rs");
+        let chunks = chunk_source(Language::from_extension("rs"), &text);
+        let stop = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(AtomicI64::new(0));
+        let rewriter = {
+            let (stop, progress) = (Arc::clone(&stop), Arc::clone(&progress));
+            std::thread::spawn(move || {
+                let mut store = Store::open(&config).expect("writer store");
+                let vectors: Vec<_> = chunks
+                    .iter()
+                    .map(|chunk| {
+                        (
+                            chunk.key,
+                            hash_embed(std::slice::from_ref(&chunk.text)).expect("hash")[0].clone(),
+                        )
+                    })
+                    .collect();
+                let mut generation = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    generation += 1;
+                    let row = FileRow {
+                        mtime_ns: generation,
+                        size: 1,
+                        hash: [0; 32],
+                    };
+                    store
+                        .replace_file("src/walk.rs", &row, &chunks, &vectors)
+                        .expect("replace");
+                    progress.store(generation, Ordering::Relaxed);
+                    // a trailing row keeps the highest id above this file's, so a rewrite never reuses its old ids
+                    store
+                        .replace_file("src/pad.rs", &row, &chunks[..1], &vectors[..1])
+                        .expect("pad");
+                }
+            })
+        };
+
+        while progress.load(Ordering::Relaxed) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let mut empty = 0;
+        for _ in 0..300 {
+            let hits = search(
+                &corpus.shard,
+                &corpus.root(),
+                "walk files respecting gitignore",
+                3,
+            )
+            .await
+            .expect("search");
+            empty += usize::from(hits.is_empty());
+        }
+        stop.store(true, Ordering::Relaxed);
+        rewriter.join().expect("rewriter");
+
+        assert_eq!(
+            empty, 0,
+            "{empty} of 300 searches saw every candidate chunk deleted"
+        );
     }
 
     #[proxima::test(runtime = "tokio")]
