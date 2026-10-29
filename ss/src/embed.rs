@@ -16,6 +16,7 @@ pub type EmbedOutput = Result<Vec<Vec<f32>>, EmbedError>;
 
 pub const HASH_DIM: usize = 256;
 pub const FASTEMBED_DIM: usize = 384;
+pub const EMBED_MAX_TOKENS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EmbedderKind {
@@ -224,12 +225,15 @@ fn flush(current: &mut String, found: &mut Vec<String>) {
 /// Builds the fastembed model: `SS_MODEL_DIR`, then a local Hugging Face snapshot, then a download.
 pub fn load_fastembed(
     cache_dir: &std::path::Path,
+    intra_threads: usize,
 ) -> Result<impl FnMut(&[String]) -> EmbedOutput + use<>, EmbedError> {
     let mut engine = match local_snapshot() {
-        Some(snapshot) => from_snapshot(&snapshot)?,
+        Some(snapshot) => from_snapshot(&snapshot, intra_threads)?,
         None => TextEmbedding::try_new(
             TextInitOptions::new(fastembed::EmbeddingModel::BGESmallENV15)
                 .with_cache_dir(cache_dir.to_path_buf())
+                .with_max_length(EMBED_MAX_TOKENS)
+                .with_intra_threads(intra_threads)
                 .with_show_download_progress(false),
         )
         .map_err(|error| EmbedError::Model(error.to_string()))?,
@@ -257,7 +261,7 @@ fn local_snapshot() -> Option<PathBuf> {
     explicit.or(discovered)
 }
 
-fn from_snapshot(dir: &std::path::Path) -> Result<TextEmbedding, EmbedError> {
+fn from_snapshot(dir: &std::path::Path, intra_threads: usize) -> Result<TextEmbedding, EmbedError> {
     let read = |name: &str| {
         std::fs::read(dir.join(name)).map_err(|error| EmbedError::Model(format!("{name}: {error}")))
     };
@@ -270,8 +274,13 @@ fn from_snapshot(dir: &std::path::Path) -> Result<TextEmbedding, EmbedError> {
     let model = UserDefinedEmbeddingModel::new(read("onnx/model.onnx")?, files)
         .with_pooling(Pooling::Cls)
         .with_quantization(QuantizationMode::None);
-    TextEmbedding::try_new_from_user_defined(model, InitOptionsUserDefined::new())
-        .map_err(|error| EmbedError::Model(error.to_string()))
+    TextEmbedding::try_new_from_user_defined(
+        model,
+        InitOptionsUserDefined::new()
+            .with_max_length(EMBED_MAX_TOKENS)
+            .with_intra_threads(intra_threads),
+    )
+    .map_err(|error| EmbedError::Model(error.to_string()))
 }
 
 #[cfg(test)]
@@ -345,7 +354,7 @@ mod tests {
     async fn real_fastembed_model_ranks_the_walker_above_unrelated_code() {
         let cache = tempfile::tempdir().expect("model cache dir");
         let cache_path = cache.path().to_path_buf();
-        let pool = EmbedPool::spawn(1, move || load_fastembed(&cache_path));
+        let pool = EmbedPool::spawn(1, move || load_fastembed(&cache_path, 2));
         let walker = "/// files honoring .gitignore\npub fn list_files(root: &Path) -> Vec<PathBuf> {\n    WalkBuilder::new(root).require_git(false).build().collect()\n}".to_owned();
         let unrelated = "fn parse_http_header(line: &str) -> Option<(String, String)> {\n    let (name, value) = line.split_once(':')?;\n    Some((name.trim().to_owned(), value.trim().to_owned()))\n}".to_owned();
         let query = "walk files respecting gitignore".to_owned();

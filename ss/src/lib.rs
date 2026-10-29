@@ -5,6 +5,7 @@ pub mod embed;
 pub mod error;
 pub mod index;
 pub mod pipeline;
+pub mod query;
 pub mod store;
 pub mod walk;
 
