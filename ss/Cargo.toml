@@ -10,11 +10,13 @@ blake3 = "1.8.7"
 clap = { version = "4.6.7", features = ["derive"] }
 dirs = "7.0.0"
 fastembed = "7.5.0"
+flume = { version = "0.12.0", default-features = false }
 futures = "0.3.34"
 ignore = "0.4.34"
 interprocess = { version = "2.4.7", features = ["tokio"] }
 notify = "8.2.1"
 proxima = { version = "0.1.0", path = "../../../slot-0/proxima", package = "proxima-lib", default-features = false, features = ["macros", "runtime-tokio", "tokio"] }
+proxima-telemetry = { version = "0.1.0", path = "../../../slot-0/proxima/proxima-telemetry", features = ["std", "emit", "macros"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

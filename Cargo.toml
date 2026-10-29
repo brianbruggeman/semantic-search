@@ -14,3 +14,6 @@ warnings = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
 pedantic = { level = "warn", priority = -1 }
+# errors are enumerated by thiserror types in each signature; per-function prose would repeat them
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
