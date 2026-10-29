@@ -1,77 +1,69 @@
 # ss design
 
-`ss` = semantic code search. Two binaries, one shared daemon. `ssd` is the daemon and admin tool
-(`ssd serve|status|stop|watch add|rm|list <path>`); `ss <terms>` and `ss index <path>` are thin clients.
-Distinct from ragd: no dependency on it.
+`ss` = semantic code search. `ssd` is the shared daemon and admin tool (`ssd serve|status|stop|watch add|rm|list`);
+`ss <terms>` and `ss index <path>` are thin clients that start `ssd` on demand. No dependency on ragd.
 
 ## assumption: "arena"
-One arena = one `ssd` owning one set of indexes. Every client call is a short, independent, stateless
-request admitted into it. Many connections multiplex on one endpoint, requests carry an id, reads never block
-on writes (SQLite WAL, a connection per operation), admission is bounded and FIFO with an explicit `busy`
-beyond the queue depth, one watch registry serves all callers, a crashed client leaves nothing behind.
+One arena = one `ssd` owning one set of indexes. Every client call is a short, stateless request admitted into it:
+many connections on one endpoint, requests tagged with an id, reads never block on writes (SQLite WAL, a connection
+per operation), bounded FIFO admission with an explicit `busy` past the queue depth, one watch registry for all
+callers, a crashed client leaves nothing behind (the request still runs to completion; nothing is cancelled).
 
 ## what is mirrored (and what is not there)
 - rg-pool at the read revision is a skeleton: every lib is <= 9 lines (`rg-pool-core/src/lib.rs` is a doc only,
-  `rg-pool/src/main.rs:1-10` is an empty clap parser). There is no daemon, IPC, watcher or pool to copy. Mirrored
-  from it: workspace + lint shape (`rg-pool/Cargo.toml:1-16`), tier build gate (`scripts/gate.sh`, `x86_64-unknown-none`
-  for the tier-1 crates), pinned toolchain (`rust-toolchain.toml`).
-- proxima precedent for a daemon binary: `tools/proxima-cli/src/daemon.rs:80` (`#[proxima::main(runtime = "tokio")]`)
-  and `:106-120` (`Exporter::fan([std, file])` + a drain thread, i.e. console AND file, never OTLP-only). ss mirrors both.
-- admission: `proxima-primitives/src/pipe/credit_gate.rs:31` (`CreditGate`) is a capped gate but wakes all waiters
-  (`notify_waiters`, `:57`) and has no depth bound, so it is neither FIFO nor able to answer `busy`. ss adds one
-  wrapper pipe, `Admit`, over a FIFO tokio semaphore. `Pipe` is `proxima-primitives/src/pipe/primitives.rs:91`,
-  composition is `PipeExt::and_then` (`pipe/ext.rs:48`).
-- runtime: prime has no Unix-socket or named-pipe adapter (`proxima/ai_docs/windows-surface.jsonl`, id `net-adapters`),
-  so the daemon runs on the tokio fallback. Pure stages (chunker, fusion, codec) are runtime-free and tested on prime.
+  `rg-pool/src/main.rs:1-10` an empty clap parser). No daemon, IPC, watcher or pool exists to copy. Mirrored:
+  workspace + lint shape (`rg-pool/Cargo.toml:1-16`), tier gate (`scripts/gate.sh`, `x86_64-unknown-none`), toolchain pin.
+- proxima daemon precedent: `tools/proxima-cli/src/daemon.rs:80` (`#[proxima::main(runtime = "tokio")]`) and `:106-120`
+  (`Exporter::fan([std, file])` + drain thread: console AND file, never OTLP-only).
+- admission: `proxima-primitives/src/pipe/credit_gate.rs:31` `CreditGate` wakes all waiters (`:57`, `notify_waiters`)
+  and has no depth bound: not FIFO, cannot answer `busy`. ss adds one wrapper pipe, `Admit`, over a FIFO semaphore.
+  `Pipe` is `pipe/primitives.rs:91`; composition is `PipeExt::and_then` (`pipe/ext.rs:48`).
+- runtime: prime has no Unix-socket or named-pipe adapter (`proxima/ai_docs/windows-surface.jsonl`, `net-adapters`), so
+  the daemon runs on the tokio fallback; chunker, fusion and codec are runtime-free and tested on prime.
 
 ## process model
-- State dir: `<cache_dir>/ss` (override `SS_HOME`): `ssd.lock`, `ssd.sock` (unix), `state.json`, `logs/`,
-  `roots/<blake3(root)[..16]>/index.db` (SQLite: vectors, chunks, FTS5, file table).
-- Client: connect; on failure spawn `ssd serve` detached (stdio null; unix: the child calls `setsid` first thing;
-  Windows: `DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`), then poll connect with a bounded
-  timeout (default 15 s, 25 ms backoff) and retry the request once.
-- IPC per OS via `interprocess::local_socket` in crate `ss-ipc` (platform-coupled, isolated so Windows can be
-  cross-checked): unix = socket file in a 0700 state dir; Windows = named pipe `\\.\pipe\ss-<blake3(user+home)[..12]>`
-  created with an owner-only DACL (`D:P(A;;GA;;;OW)`) and remote clients rejected.
-- Single-instance guard: exclusive `File::try_lock` on `ssd.lock` held for process life. The loser exits 0 after
-  logging "already running". Unix also unlinks a stale socket only after winning the lock.
-- Idle exit: no watches registered AND no client for `idle_secs` (default 600). Registered watches keep it up.
+- State dir `<cache_dir>/ss` (override `SS_HOME`): `ssd.lock`, `ssd.sock` (unix), `state.json` (roots + watches),
+  `logs/`, `roots/<blake3(root)[..16]>/index.db` (SQLite: vectors, chunks, FTS5, file table).
+- Client: connect; on failure spawn `ssd serve --setsid` detached (stdio null; unix: the child calls `setsid` first;
+  Windows: `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`), then retry connect (25 ms) until
+  `spawn_timeout_ms` (15 s), re-spawning each second since a loser exits at once; one request retry.
+- IPC (`ss-ipc`, platform-coupled, isolated so Windows can be cross-checked): unix socket in a 0700 state dir;
+  Windows named pipe `\\.\pipe\ss-<fnv1a(home)>` with owner-only DACL `D:P(A;;GA;;;OW)`, remote clients rejected.
+- Single instance: exclusive `File::try_lock` on `ssd.lock` for the process life; the loser exits 0.
+- Idle exit: no watches AND no request for `idle_secs` (600). `status` and `stop` do not count as activity.
 
-## protocol (crate `ss-proto`, no_std + alloc, sans-IO)
-JSON lines. `Frame<T> { id: u64, body: T }`. `Request`: `Search{query, path, limit}`, `Index{path}`,
-`WatchAdd{path}`, `WatchRm{path}`, `WatchList`, `Status`, `Stop`. `Response`: `Hits`, `Indexed(stats)`, `Watches`,
-`Status`, `Ok`, `Error{kind: Busy|NotIndexed|BadRequest|Internal, message}`. `LineDecoder::push(&[u8])` yields
-complete frames; no IO in the crate. Responses may arrive out of order; the id pairs them.
+## protocol (`ss-proto`, no_std + alloc, sans-IO)
+JSON lines of `Frame<T>{id, body}`. `Request`: `Search{query,path,limit}`, `Index{path}`, `WatchAdd/Rm{path}`,
+`WatchList`, `Status`, `Stop`. `Response`: `Hits`, `Indexed`, `Watches`, `Status`, `Ok`, `Error{Busy|NotIndexed|
+BadRequest|Internal}`. `LineDecoder::push(&[u8])` / `next_frame()` do the framing; the crate performs no IO.
 
-## pipe decomposition (every stage is a `Pipe`, `In -> Result<Out, IndexError>`)
-- source (`In = ()`): `Walk` -> `Vec<PathBuf>` (`ignore::WalkBuilder`, gitignore-aware); watcher events enter as
-  the same `Vec<PathBuf>`.
-- transform `ReadFile`: `PathBuf -> Option<SourceFile>` (`None` = binary/oversize/unreadable, skipped).
-- transform `Chunk`: `SourceFile -> FileChunks` (tree-sitter rust/python/ts/js/go, line-window fallback; key =
-  blake3(chunk text)).
-- transform `Embed`: `FileChunks -> EmbeddedFile`; asks the store which keys exist (hash-skip), embeds only unseen
-  ones. The embedder is itself a pipe `Vec<String> -> Vec<Vec<f32>>`: fastembed (real), or a hashing embedder.
-- transform-with-effect `Store`: `EmbeddedFile -> FileReport{seen, embedded, skipped}` (sink-shaped; returns the
-  report so counters and tests read it).
-- Per-file pipeline = `ReadFile.and_then(Chunk).and_then(Embed).and_then(Store)`. The indexer drives it per path and
-  deletes vanished files/chunks. Query path: `Embed(query)` + cosine scan + FTS5 BM25 -> RRF (k = 60).
-- Admission: `Admit<P>` wraps the search pipe (cap 8, queue 64) and the index pipe (cap 2, queue 8); the embed pool
-  has N low-priority threads and two lanes (query lane drained first) so an index flood cannot starve queries.
+## pipe decomposition (each stage `Pipe`, error `IndexError`)
+- source (`In = ()`): `Walk` -> `Vec<PathBuf>` (`ignore`, gitignore-aware); watcher batches enter as the same list.
+- transform `ReadFile`: `PathBuf -> Flow<SourceFile>` (mtime+size, then content hash; skips binary/oversize/vanished).
+- transform `Chunk`: `Flow<SourceFile> -> Flow<FileChunks>` (tree-sitter rust/python/ts/js/go, 40-line windows
+  otherwise; key = blake3(chunk text)).
+- transform `Embed`: `Flow<FileChunks> -> Flow<EmbeddedFile>`: asks the store which keys exist (hash-skip) and embeds
+  only unseen ones through `EmbedPool`, itself a pipe `EmbedRequest -> Vec<Vec<f32>>` (fastembed or feature hashing).
+- sink-shaped `StoreFile`: `Flow<EmbeddedFile> -> FileReport` (one transaction; the report feeds counters and tests).
+- Per file: `ReadFile.and_then(Chunk).and_then(Embed).and_then(StoreFile)`; `Flow::Done` short-circuits unchanged files.
+- Query: embed (query lane) + exact cosine scan + FTS5 BM25 -> RRF (k = 60). `Router: Request -> Response` is a pipe;
+  `Admit` wraps search (cap 8, queue 64) and index (cap 2, queue 8). The embed pool has N low-priority threads and a
+  query lane drained first, so an index flood cannot starve queries.
 
 ## watch
-`ssd watch add` persists to `state.json`, starts the watcher, then its first batch is a full mtime+hash rescan; later
-events are debounced (200 ms), filtered (hidden, root `.gitignore`/`.ignore`, the state dir) and fed to the same
-pipeline (`index_changed`). Adding an already-watched or nested path is a no-op (nested paths are covered by the
-ancestor; a parent absorbs child watches). Watcher error/overflow, or `rescan_secs` (default 300) of event silence,
-triggers a full rescan: events are hints, the rescan is truth. Backend is `native` (OS events) or `poll` (stat
-polling) via `SS_WATCH_BACKEND`; macOS FSEvents was observed to deliver late or not at all under load, which is why
-the safety rescan exists and why most watch tests use `poll`. Nested `.gitignore` files are honored by the walk
-(rescan) but not by the event filter.
+`ssd watch add` persists to `state.json`, starts the watcher, and its first batch is a full mtime+hash rescan; later
+events are debounced (200 ms), filtered (hidden, root `.gitignore`/`.ignore`, state dir) and fed to `index_changed`.
+A repeated or nested add is a no-op (the ancestor covers it); a parent absorbs child watches. Watcher error/overflow, or
+`rescan_secs` (300) of silence, forces a full rescan: events are hints, the rescan is truth. Backend `native` or `poll`
+(`SS_WATCH_BACKEND`): macOS FSEvents was observed late or silent under load, hence the safety rescan and `poll` in most
+tests. The walk honors nested `.gitignore` files; the event filter does not.
 
-## designs abandoned
-Per-invocation embedding in the CLI (violates no-heavy-work); a trait for the embedder (it is a pipe); one
-`Mutex<TextEmbedding>` (lock where an owner belongs: worker threads own models); sqlite-vec (exact cosine scan is
-required and sufficient); `CreditGate` for admission (not FIFO, no shed).
+## telemetry
+`ssd serve` installs the default recorder with console (`Exporter::std()`: logs only; `StdSplitPipe` drops spans and
+metrics, `proxima-telemetry/src/pipes.rs:1531,1606`) AND a rotating JSON-lines file under `logs/` (spans, logs, metrics).
+Stages carry `#[proxima::instrument]`; each index run adds `chunks_seen/embedded/skipped` counters plus one structured
+`index run complete` log (the file formatter writes counters without names, `pipes.rs:1988-1991`).
 
-## unverifiable here
-Windows runtime behavior: named pipe DACL, DETACHED_PROCESS spawn, `File::try_lock` on Windows.
+## abandoned
+Per-call embedding in the CLI; an embedder trait (it is a pipe); `Mutex<TextEmbedding>` (worker threads own models);
+sqlite-vec (exact scan suffices); `CreditGate` for admission. Unverifiable here: Windows runtime behavior.
