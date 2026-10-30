@@ -28,7 +28,7 @@ impl Language {
         }
     }
 
-    fn grammar(self) -> tree_sitter::Language {
+    pub(crate) fn grammar(self) -> tree_sitter::Language {
         match self {
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
             Self::Python => tree_sitter_python::LANGUAGE.into(),

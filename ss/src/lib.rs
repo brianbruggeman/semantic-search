@@ -5,6 +5,7 @@ pub mod client;
 pub mod daemon;
 pub mod embed;
 pub mod error;
+pub mod graph;
 pub mod index;
 pub mod pipeline;
 pub mod query;
