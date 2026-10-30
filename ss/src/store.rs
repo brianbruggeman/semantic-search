@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::thread::sleep;
+use std::time::Duration;
 
 use proxima::telemetry::debug;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -37,6 +39,8 @@ END;
 
 /// Bumped whenever the graph tables change shape or meaning; part of the pinned store identity.
 pub const GRAPH_VERSION: u32 = 1;
+const WAL_ATTEMPTS: u32 = 200;
+const WAL_RETRY_PAUSE: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreConfig {
@@ -70,9 +74,8 @@ impl Store {
     pub fn open(config: &StoreConfig) -> Result<Self, IndexError> {
         std::fs::create_dir_all(&config.dir)?;
         let conn = Connection::open(config.dir.join("index.db"))?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=10000;",
-        )?;
+        conn.execute_batch("PRAGMA busy_timeout=10000; PRAGMA synchronous=NORMAL;")?;
+        enter_wal(&conn)?;
         conn.execute_batch(SCHEMA)?;
         let store = Self { conn };
         store.pin_model(&config.model_id)?;
@@ -323,6 +326,22 @@ impl Store {
     }
 }
 
+/// Switching a fresh database to WAL can fail with `busy` while another connection does the same, and sqlite does not
+/// run the busy handler for that case, so the switch is retried until the other connection finishes.
+fn enter_wal(conn: &Connection) -> rusqlite::Result<()> {
+    for _ in 0..WAL_ATTEMPTS {
+        match conn.execute_batch("PRAGMA journal_mode=WAL;") {
+            Err(rusqlite::Error::SqliteFailure(failure, _))
+                if failure.code == rusqlite::ErrorCode::DatabaseBusy =>
+            {
+                sleep(WAL_RETRY_PAUSE);
+            }
+            other => return other,
+        }
+    }
+    conn.execute_batch("PRAGMA journal_mode=WAL;")
+}
+
 fn replace_graph(tx: &Transaction<'_>, path: &str, graph: &FileGraph) -> rusqlite::Result<()> {
     tx.execute("DELETE FROM nodes WHERE file=?1", [path])?;
     tx.execute("DELETE FROM edges WHERE file=?1", [path])?;
@@ -386,6 +405,9 @@ fn dot(query: &[f32], blob: &[u8]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
     use super::*;
     use crate::chunk::chunk_key;
     use crate::embed::{EmbedProfile, EmbedderKind, Provider};
@@ -521,6 +543,32 @@ mod tests {
             ),
             (0, 0, 0)
         );
+    }
+
+    #[test]
+    fn many_connections_opening_a_fresh_shard_at_once_all_succeed() {
+        for round in 0..20 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let gate = Arc::new(Barrier::new(16));
+            let opens: Vec<_> = (0..16)
+                .map(|_| {
+                    let (gate, dir) = (Arc::clone(&gate), dir.path().to_path_buf());
+                    thread::spawn(move || {
+                        gate.wait();
+                        Store::open(&StoreConfig {
+                            dir,
+                            model_id: "feature-hash-256".to_owned(),
+                        })
+                        .map(drop)
+                    })
+                })
+                .collect();
+
+            for open in opens {
+                let outcome = open.join().expect("open thread");
+                assert!(outcome.is_ok(), "round {round}: {outcome:?}");
+            }
+        }
     }
 
     #[test]
