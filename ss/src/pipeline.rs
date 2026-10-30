@@ -10,6 +10,7 @@ use ss_proto::IndexStats;
 use crate::chunk::{ChunkKey, Language, RawChunk, chunk_source};
 use crate::embed::{EmbedPool, EmbedRequest, Lane};
 use crate::error::IndexError;
+use crate::graph::{FileGraph, extract};
 use crate::store::{FileRow, Store, StoreConfig};
 
 pub const MAX_FILE_BYTES: u64 = 1 << 20;
@@ -41,6 +42,8 @@ pub struct FileChunks {
     pub rel: String,
     pub row: FileRow,
     pub chunks: Vec<RawChunk>,
+    pub text: String,
+    pub graph: FileGraph,
 }
 
 #[derive(Debug)]
@@ -48,6 +51,7 @@ pub struct EmbeddedFile {
     pub rel: String,
     pub row: FileRow,
     pub chunks: Vec<RawChunk>,
+    pub graph: FileGraph,
     pub fresh: Vec<(ChunkKey, Vec<f32>)>,
 }
 
@@ -213,16 +217,46 @@ fn chunk_flow(input: Flow<SourceFile>) -> Flow<FileChunks> {
         Flow::Done(done) => return Flow::Done(done),
         Flow::Next(source) => source,
     };
-    let language = Path::new(&source.rel)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .and_then(Language::from_extension);
+    let language = language_of(&source.rel);
     let chunks = chunk_source(language, &source.text);
     Flow::Next(FileChunks {
         rel: source.rel,
         row: source.row,
         chunks,
+        text: source.text,
+        graph: FileGraph::default(),
     })
+}
+
+fn language_of(rel: &str) -> Option<Language> {
+    Path::new(rel)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(Language::from_extension)
+}
+
+/// transform: `Flow<FileChunks> -> Flow<FileChunks>`; fills the file's code graph from the text `Chunk` kept, then drops the text.
+#[derive(Clone, Copy, Default)]
+pub struct Extract;
+
+impl Pipe for Extract {
+    type In = Flow<FileChunks>;
+    type Out = Flow<FileChunks>;
+    type Err = IndexError;
+
+    fn call(&self, input: Self::In) -> impl Future<Output = Result<Self::Out, Self::Err>> {
+        std::future::ready(Ok(extract_flow(input)))
+    }
+}
+
+#[proxima::instrument]
+fn extract_flow(input: Flow<FileChunks>) -> Flow<FileChunks> {
+    let Flow::Next(mut file) = input else {
+        return input;
+    };
+    let text = std::mem::take(&mut file.text);
+    file.graph = extract(language_of(&file.rel), &file.rel, &text, &file.chunks);
+    Flow::Next(file)
 }
 
 /// transform: `Flow<FileChunks> -> Flow<EmbeddedFile>`; embeds only keys the store has not seen (hash-skip).
@@ -269,6 +303,7 @@ impl Pipe for Embed {
                 rel: file.rel,
                 row: file.row,
                 chunks: file.chunks,
+                graph: file.graph,
                 fresh,
             }))
         }
@@ -338,7 +373,13 @@ impl Pipe for StoreFile {
 #[proxima::instrument]
 fn store_file(config: &StoreConfig, file: &EmbeddedFile) -> Result<FileReport, IndexError> {
     let stats = file_stats(file);
-    Store::open(config)?.replace_file(&file.rel, &file.row, &file.chunks, &file.fresh)?;
+    Store::open(config)?.replace_file(
+        &file.rel,
+        &file.row,
+        &file.chunks,
+        &file.fresh,
+        &file.graph,
+    )?;
     Ok(report(&file.rel, stats))
 }
 
@@ -355,13 +396,15 @@ fn file_stats(file: &EmbeddedFile) -> IndexStats {
     }
 }
 
-pub type FilePipeline = AndThen<AndThen<AndThen<ReadFile, Chunk>, Embed>, StoreFile>;
+pub type FilePipeline =
+    AndThen<AndThen<AndThen<AndThen<ReadFile, Chunk>, Extract>, Embed>, StoreFile>;
 
-/// `ReadFile.and_then(Chunk).and_then(Embed).and_then(StoreFile)`: path in, report out.
+/// `ReadFile.and_then(Chunk).and_then(Extract).and_then(Embed).and_then(StoreFile)`: path in, report out.
 #[must_use]
 pub fn file_pipeline(root: &Path, store: &Arc<StoreConfig>, pool: &EmbedPool) -> FilePipeline {
     ReadFile::new(root, Arc::clone(store))
         .and_then(Chunk)
+        .and_then(Extract)
         .and_then(Embed::new(Arc::clone(store), pool.clone()))
         .and_then(StoreFile::new(Arc::clone(store)))
 }

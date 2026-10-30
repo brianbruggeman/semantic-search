@@ -297,4 +297,131 @@ mod tests {
         );
         assert_eq!(corpus.chunk_count(), 0);
     }
+
+    fn graph_counts(corpus: &crate::fixtures::Corpus, path: &str) -> (u64, u64) {
+        Store::open(&corpus.shard.config)
+            .expect("open")
+            .file_graph_counts(path)
+            .expect("counts")
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn indexing_own_src_stores_nodes_and_edges() {
+        let corpus = own_src_corpus(&hash_pool(), EmbedderKind::Hash);
+
+        index_tree(&corpus.shard, &corpus.root())
+            .await
+            .expect("index");
+
+        let store = Store::open(&corpus.shard.config).expect("open");
+        let (nodes, edges) = (
+            store.node_count().expect("nodes"),
+            store.edge_count().expect("edges"),
+        );
+        println!("own src graph: nodes={nodes} edges={edges}");
+        assert!(nodes > 100 && edges > 500, "nodes={nodes} edges={edges}");
+        assert!(graph_counts(&corpus, "src/query.rs").0 > 5);
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn every_supported_language_fixture_stores_nodes_and_edges() {
+        let corpus = own_src_corpus(&hash_pool(), EmbedderKind::Hash);
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/graph");
+        crate::fixtures::copy_dir(&fixtures, &corpus.root().join("fixtures"));
+
+        index_tree(&corpus.shard, &corpus.root())
+            .await
+            .expect("index");
+
+        for name in [
+            "inventory.py",
+            "scheduler.ts",
+            "tally.js",
+            "cache.go",
+            "cache_test.go",
+        ] {
+            let (nodes, edges) = graph_counts(&corpus, &format!("fixtures/{name}"));
+            println!("{name}: nodes={nodes} edges={edges}");
+            assert!(
+                nodes > 1 && edges > 1,
+                "{name}: nodes={nodes} edges={edges}"
+            );
+        }
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn editing_one_function_rewrites_only_that_files_graph_rows() {
+        let corpus = own_src_corpus(&hash_pool(), EmbedderKind::Hash);
+        index_tree(&corpus.shard, &corpus.root())
+            .await
+            .expect("first index");
+        let store = Store::open(&corpus.shard.config).expect("open");
+        let walk_before = (
+            graph_counts(&corpus, "src/walk.rs"),
+            store.node_ids("src/walk.rs").expect("ids"),
+        );
+        let query_before = (
+            graph_counts(&corpus, "src/query.rs"),
+            store.node_ids("src/query.rs").expect("ids"),
+        );
+        let target = corpus.root().join("src/walk.rs");
+        let edited = format!(
+            "{}\npub fn added_by_edit() -> u32 {{\n    list_files_stub()\n}}\n",
+            std::fs::read_to_string(&target).expect("read")
+        );
+        std::fs::write(&target, edited).expect("edit");
+
+        index_tree(&corpus.shard, &corpus.root())
+            .await
+            .expect("second index");
+
+        let walk_after = (
+            graph_counts(&corpus, "src/walk.rs"),
+            store.node_ids("src/walk.rs").expect("ids"),
+        );
+        let query_after = (
+            graph_counts(&corpus, "src/query.rs"),
+            store.node_ids("src/query.rs").expect("ids"),
+        );
+        assert_eq!(walk_after.0.0, walk_before.0.0 + 1, "one new node");
+        assert_eq!(walk_after.0.1, walk_before.0.1 + 2, "contains + calls edge");
+        assert_ne!(
+            walk_after.1, walk_before.1,
+            "edited file rows are rewritten"
+        );
+        assert_eq!(
+            query_after, query_before,
+            "untouched file rows are the same rows"
+        );
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn deleting_a_file_removes_its_graph_rows_and_leaves_calls_to_it_unresolved() {
+        let corpus = own_src_corpus(&hash_pool(), EmbedderKind::Hash);
+        index_tree(&corpus.shard, &corpus.root())
+            .await
+            .expect("first index");
+        let store = Store::open(&corpus.shard.config).expect("open");
+        let (nodes_before, edges_before) = (
+            store.node_count().expect("nodes"),
+            store.edge_count().expect("edges"),
+        );
+        let (walk_nodes, walk_edges) = graph_counts(&corpus, "src/walk.rs");
+        std::fs::remove_file(corpus.root().join("src/walk.rs")).expect("delete");
+
+        index_tree(&corpus.shard, &corpus.root())
+            .await
+            .expect("second index");
+
+        assert!(walk_nodes > 0 && walk_edges > 0);
+        assert_eq!(graph_counts(&corpus, "src/walk.rs"), (0, 0));
+        assert_eq!(
+            store.node_count().expect("nodes"),
+            nodes_before - walk_nodes
+        );
+        assert_eq!(
+            store.edge_count().expect("edges"),
+            edges_before - walk_edges
+        );
+    }
 }

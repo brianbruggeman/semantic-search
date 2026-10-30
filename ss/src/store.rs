@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::chunk::{ChunkKey, RawChunk};
 use crate::error::IndexError;
+use crate::graph::{FileGraph, GraphEdge, GraphNode};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);
@@ -14,6 +15,13 @@ CREATE TABLE IF NOT EXISTS vectors(key BLOB PRIMARY KEY, vec BLOB NOT NULL) WITH
 CREATE TABLE IF NOT EXISTS chunks(id INTEGER PRIMARY KEY, path TEXT NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, key BLOB NOT NULL, text TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS chunks_path ON chunks(path);
 CREATE INDEX IF NOT EXISTS chunks_key ON chunks(key);
+CREATE TABLE IF NOT EXISTS nodes(id INTEGER PRIMARY KEY, file TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, qpath TEXT NOT NULL, sig TEXT NOT NULL, doc TEXT NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, chunk_key BLOB);
+CREATE INDEX IF NOT EXISTS nodes_file ON nodes(file);
+CREATE INDEX IF NOT EXISTS nodes_name ON nodes(name);
+CREATE INDEX IF NOT EXISTS nodes_chunk ON nodes(chunk_key);
+CREATE TABLE IF NOT EXISTS edges(id INTEGER PRIMARY KEY, file TEXT NOT NULL, kind TEXT NOT NULL, src TEXT NOT NULL, dst TEXT NOT NULL, qual TEXT NOT NULL, line INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS edges_file ON edges(file, src);
+CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst);
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, path, content='chunks', content_rowid='id');
 CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
   INSERT INTO chunks_fts(rowid, text, path) VALUES (new.id, new.text, new.path);
@@ -22,6 +30,9 @@ CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
   INSERT INTO chunks_fts(chunks_fts, rowid, text, path) VALUES ('delete', old.id, old.text, old.path);
 END;
 ";
+
+/// Bumped whenever the graph tables change shape or meaning; part of the pinned store identity.
+pub const GRAPH_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreConfig {
@@ -64,18 +75,21 @@ impl Store {
     }
 
     fn pin_model(&self, model_id: &str) -> rusqlite::Result<()> {
+        let pinned = format!("{model_id}+graph{GRAPH_VERSION}");
         let current: Option<String> = self
             .conn
             .query_row("SELECT v FROM meta WHERE k='model'", [], |row| row.get(0))
             .optional()?;
-        if current.as_deref() == Some(model_id) {
+        if current.as_deref() == Some(pinned.as_str()) {
             return Ok(());
         }
         self.conn
-            .execute_batch("DELETE FROM vectors; DELETE FROM chunks; DELETE FROM files;")?;
+            .execute_batch(
+            "DELETE FROM vectors; DELETE FROM chunks; DELETE FROM files; DELETE FROM nodes; DELETE FROM edges;",
+        )?;
         self.conn.execute(
             "INSERT OR REPLACE INTO meta(k, v) VALUES ('model', ?1)",
-            [model_id],
+            [pinned],
         )?;
         Ok(())
     }
@@ -138,6 +152,7 @@ impl Store {
         row: &FileRow,
         chunks: &[RawChunk],
         vectors: &[(ChunkKey, Vec<f32>)],
+        graph: &FileGraph,
     ) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         for (key, vector) in vectors {
@@ -153,6 +168,7 @@ impl Store {
                 params![path, chunk.start_line, chunk.end_line, chunk.key.as_slice(), chunk.text],
             )?;
         }
+        replace_graph(&tx, path, graph)?;
         tx.execute(
             "INSERT OR REPLACE INTO files(path, mtime_ns, size, hash) VALUES (?1, ?2, ?3, ?4)",
             params![path, row.mtime_ns, row.size, row.hash.as_slice()],
@@ -166,6 +182,10 @@ impl Store {
             .execute("DELETE FROM chunks WHERE path=?1", [path])?;
         self.conn
             .execute("DELETE FROM files WHERE path=?1", [path])?;
+        self.conn
+            .execute("DELETE FROM nodes WHERE file=?1", [path])?;
+        self.conn
+            .execute("DELETE FROM edges WHERE file=?1", [path])?;
         Ok(removed)
     }
 
@@ -183,6 +203,35 @@ impl Store {
 
     pub fn chunk_count(&self) -> rusqlite::Result<u64> {
         self.count("chunks")
+    }
+
+    pub fn node_count(&self) -> rusqlite::Result<u64> {
+        self.count("nodes")
+    }
+
+    pub fn edge_count(&self) -> rusqlite::Result<u64> {
+        self.count("edges")
+    }
+
+    /// Graph rows owned by one file: (nodes, edges).
+    pub fn file_graph_counts(&self, path: &str) -> rusqlite::Result<(u64, u64)> {
+        let count = |table: &str| -> rusqlite::Result<u64> {
+            let total: i64 = self.conn.query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE file=?1"),
+                [path],
+                |row| row.get(0),
+            )?;
+            Ok(u64::try_from(total).unwrap_or(0))
+        };
+        Ok((count("nodes")?, count("edges")?))
+    }
+
+    /// Row ids of one file's nodes; unchanged ids after a re-index prove the rows were not rewritten.
+    pub fn node_ids(&self, path: &str) -> rusqlite::Result<Vec<i64>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id FROM nodes WHERE file=?1 ORDER BY id")?;
+        statement.query_map([path], |row| row.get(0))?.collect()
     }
 
     pub fn vector_count(&self) -> rusqlite::Result<u64> {
@@ -267,6 +316,51 @@ impl Store {
     }
 }
 
+fn replace_graph(tx: &Transaction<'_>, path: &str, graph: &FileGraph) -> rusqlite::Result<()> {
+    tx.execute("DELETE FROM nodes WHERE file=?1", [path])?;
+    tx.execute("DELETE FROM edges WHERE file=?1", [path])?;
+    for node in &graph.nodes {
+        insert_node(tx, path, node)?;
+    }
+    for edge in &graph.edges {
+        insert_edge(tx, path, edge)?;
+    }
+    Ok(())
+}
+
+fn insert_node(tx: &Transaction<'_>, path: &str, node: &GraphNode) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO nodes(file, kind, name, qpath, sig, doc, start_line, end_line, chunk_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            path,
+            node.kind.as_str(),
+            node.name,
+            node.qpath,
+            node.signature,
+            node.doc,
+            node.start_line,
+            node.end_line,
+            node.chunk_key.as_ref().map(<[u8; 32]>::as_slice)
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_edge(tx: &Transaction<'_>, path: &str, edge: &GraphEdge) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO edges(file, kind, src, dst, qual, line) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            path,
+            edge.kind.as_str(),
+            edge.src,
+            edge.dst,
+            edge.qual,
+            edge.line
+        ],
+    )?;
+    Ok(())
+}
+
 fn encode_vector(vector: &[f32]) -> Vec<u8> {
     vector
         .iter()
@@ -309,7 +403,13 @@ mod tests {
             hash: key,
         };
         store
-            .replace_file("src/walk.rs", &row, &[chunk], &[(key, vec![1.0, 0.0])])
+            .replace_file(
+                "src/walk.rs",
+                &row,
+                &[chunk],
+                &[(key, vec![1.0, 0.0])],
+                &FileGraph::default(),
+            )
             .expect("replace file");
         store
     }
@@ -362,6 +462,58 @@ mod tests {
                 "{changed:?} reused vectors built under the default profile"
             );
         }
+    }
+
+    #[test]
+    fn an_index_pinned_before_the_graph_existed_is_rebuilt_not_mixed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = EmbedProfile::default().store_id(EmbedderKind::FastEmbed);
+        let mut store = store_with_one_vector(dir.path(), &id);
+        let node = crate::graph::GraphNode {
+            kind: crate::graph::NodeKind::File,
+            name: "walk.rs".to_owned(),
+            qpath: "src/walk.rs".to_owned(),
+            signature: String::new(),
+            doc: String::new(),
+            start_line: 1,
+            end_line: 1,
+            chunk_key: None,
+        };
+        let graph = FileGraph {
+            nodes: vec![node],
+            edges: Vec::new(),
+        };
+        let chunk = RawChunk {
+            start_line: 1,
+            end_line: 1,
+            text: "x".to_owned(),
+            key: chunk_key("x"),
+        };
+        let row = FileRow {
+            mtime_ns: 1,
+            size: 1,
+            hash: chunk.key,
+        };
+        store
+            .replace_file("src/walk.rs", &row, &[chunk], &[], &graph)
+            .expect("replace");
+        assert_eq!(store.node_count().expect("nodes"), 1);
+        drop(store);
+        let conn = rusqlite::Connection::open(dir.path().join("index.db")).expect("raw open");
+        conn.execute("UPDATE meta SET v=?1 WHERE k='model'", [&id])
+            .expect("pin the pre-graph identity");
+        drop(conn);
+
+        let reopened = reopen(dir.path(), &id);
+
+        assert_eq!(
+            (
+                reopened.node_count().expect("nodes"),
+                reopened.chunk_count().expect("chunks"),
+                reopened.vector_count().expect("vectors")
+            ),
+            (0, 0, 0)
+        );
     }
 
     #[test]

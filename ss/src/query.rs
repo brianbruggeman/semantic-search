@@ -115,6 +115,7 @@ mod tests {
     use crate::chunk::{Language, chunk_source};
     use crate::embed::{EmbedderKind, hash_embed};
     use crate::fixtures::{fastembed_pool, hash_pool, own_src_corpus, own_src_files};
+    use crate::graph::FileGraph;
     use crate::index::index_tree;
     use crate::store::FileRow;
 
@@ -256,12 +257,24 @@ mod tests {
                         hash: [0; 32],
                     };
                     store
-                        .replace_file("src/walk.rs", &row, &chunks, &vectors)
+                        .replace_file(
+                            "src/walk.rs",
+                            &row,
+                            &chunks,
+                            &vectors,
+                            &FileGraph::default(),
+                        )
                         .expect("replace");
                     progress.store(generation, Ordering::Relaxed);
                     // a trailing row keeps the highest id above this file's, so a rewrite never reuses its old ids
                     store
-                        .replace_file("src/pad.rs", &row, &chunks[..1], &vectors[..1])
+                        .replace_file(
+                            "src/pad.rs",
+                            &row,
+                            &chunks[..1],
+                            &vectors[..1],
+                            &FileGraph::default(),
+                        )
                         .expect("pad");
                 }
             })
