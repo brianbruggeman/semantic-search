@@ -13,7 +13,21 @@ use ss_proto::{
     Resolved,
 };
 
+mod compact;
+mod exact;
+
+pub use compact::{Compact, compact_text};
+pub use exact::exact_text;
+
 /// Tokens held back for the "cut" footer whenever a budget may drop hits.
+/// Characters held back for a `cut:` footer once a first pass already cut something.
+const FOOTER_CHARS: usize = 72;
+
+/// Default `--compact` budget in tokens.
+pub const COMPACT_BUDGET: usize = 250;
+/// Default budget in tokens of an exact search reply.
+pub const EXACT_BUDGET: usize = 300;
+
 pub const FOOTER_RESERVE: usize = 14;
 
 #[must_use]

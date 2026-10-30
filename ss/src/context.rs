@@ -208,6 +208,11 @@ pub fn follow_ups(
     ))
 }
 
+/// Tests that call `node`, uncapped: the third follow-up an agent would search for.
+pub fn test_refs(store: &Store, root: &Path, node: &NodeRow) -> Found<Vec<EdgeRef>> {
+    Ok(refs(incoming(store, root, node, &[EdgeKind::Tests])?))
+}
+
 fn container_label(store: &Store, node: &NodeRow) -> Found<String> {
     let Some((parent, _)) = node.node.qpath.rsplit_once("::") else {
         return Ok(String::new());

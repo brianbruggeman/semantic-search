@@ -1,6 +1,7 @@
 //! Measures the structured output against the old format on the frozen corpus and the 44 gold queries.
 //!
 //! `graph_eval tokens <out.json>`  M1 tokens, M2 answerability and M6 one-call sufficiency (real CPU embedder)
+//! `graph_eval arms <out.json>`    default-output arms: tokens, rule-2 sufficiency, siblings, cuts
 //! `graph_eval edges <out.tsv>`    every resolved call/import edge of the corpus graph, for the M3 precision sample
 // harness: aborts on any setup failure and divides counts into ratios for display
 #![allow(
@@ -15,6 +16,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "graph_eval_arms/mod.rs"]
+mod arms;
+
 use serde_json::json;
 use ss::context::{candidates, follow_ups};
 use ss::embed::{EmbedPool, EmbedProfile, EmbedderKind, load_fastembed};
@@ -26,20 +30,20 @@ use ss::store::{Store, StoreConfig};
 
 const BUDGET_SMALL: usize = 400;
 const BUDGET_WIDE: usize = 800;
-const SUFFICIENT: f64 = 0.8;
+pub(crate) const SUFFICIENT: f64 = 0.8;
 
-struct Gold {
-    query: String,
-    path: String,
-    start: u32,
-    end: u32,
+pub struct Gold {
+    pub query: String,
+    pub path: String,
+    pub start: u32,
+    pub end: u32,
 }
 
 fn data_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data")
 }
 
-fn load_gold() -> Vec<Gold> {
+pub(crate) fn load_gold() -> Vec<Gold> {
     std::fs::read_to_string(data_dir().join("queries.tsv"))
         .expect("queries.tsv")
         .lines()
@@ -74,7 +78,7 @@ fn percentile(sorted: &[usize], fraction: f64) -> usize {
     sorted[rank.max(1) - 1]
 }
 
-fn summary(values: &[usize]) -> (usize, usize) {
+pub(crate) fn summary(values: &[usize]) -> (usize, usize) {
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
     (percentile(&sorted, 0.5), percentile(&sorted, 0.95))
@@ -95,16 +99,16 @@ fn line_has_site(line: &str) -> bool {
         .any(|pair| pair[0] == b':' && pair[1].is_ascii_digit())
 }
 
-fn present_anywhere(text: &str, name: &str) -> bool {
+pub(crate) fn present_anywhere(text: &str, name: &str) -> bool {
     has_word(text, name)
 }
 
-fn present_with_site(text: &str, name: &str) -> bool {
+pub(crate) fn present_with_site(text: &str, name: &str) -> bool {
     text.lines()
         .any(|line| has_word(line, name) && line_has_site(line))
 }
 
-async fn open_index(work: &Path) -> (Shard, PathBuf, StoreConfig, EmbedPool) {
+pub(crate) async fn open_index(work: &Path) -> (Shard, PathBuf, StoreConfig, EmbedPool) {
     let profile = EmbedProfile::default();
     let cache = work.join("model");
     std::fs::create_dir_all(&cache).expect("model cache");
@@ -270,7 +274,7 @@ fn line_chars(text: &str) -> [usize; 7] {
     sums
 }
 
-fn share(count: usize, targets: usize) -> f64 {
+pub(crate) fn share(count: usize, targets: usize) -> f64 {
     if targets == 0 {
         1.0
     } else {
@@ -514,12 +518,13 @@ async fn main() {
     let out = PathBuf::from(args.get(2).expect("output path"));
     match args.get(1).map(String::as_str) {
         Some("tokens") => run_tokens(&out).await,
+        Some("arms") => arms::run_arms(&out).await,
         Some("edges") => {
             let source = args
                 .get(3)
                 .map_or_else(|| data_dir().join("corpus"), PathBuf::from);
             run_edges(&out, &source).await;
         }
-        other => panic!("usage: graph_eval tokens|edges <out>, got {other:?}"),
+        other => panic!("usage: graph_eval tokens|arms|edges <out>, got {other:?}"),
     }
 }

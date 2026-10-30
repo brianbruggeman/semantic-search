@@ -3,7 +3,11 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use ss::client::Client;
-use ss::render::{facets, findings_json, findings_text, graph_json, graph_text, lines_text};
+use ss::exact::{compile, scan};
+use ss::render::{
+    COMPACT_BUDGET, Compact, EXACT_BUDGET, compact_text, exact_text, facets, findings_json,
+    findings_text, graph_json, graph_text, lines_text,
+};
 use ss::settings::Settings;
 use ss_proto::{Hit, Request, Response};
 
@@ -12,6 +16,8 @@ const EXIT_NONE: u8 = 1;
 const EXIT_ERROR: u8 = 2;
 
 /// Semantic code search backed by the shared `ssd` daemon, which `ss` starts on demand.
+// clap switches are independent flags, not a state machine
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Parser)]
 #[command(name = "ss", version, args_conflicts_with_subcommands = true)]
 struct Cli {
@@ -34,6 +40,21 @@ struct Cli {
     /// Cap the whole response at about this many tokens (chars / 4), keeping hits in rank order and the top hit always
     #[arg(long, conflicts_with = "lines")]
     budget: Option<usize>,
+    /// Compact reply: paths grouped by file, signature and doc for the top hit, budget 250 tokens unless --budget is given
+    #[arg(long, conflicts_with_all = ["lines", "json"])]
+    compact: bool,
+    /// Exact search: the words are one regex, matched line by line over the indexed tree (no index needed)
+    #[arg(long, conflicts_with_all = ["lines", "json", "compact"])]
+    exact: bool,
+    /// Exact search for a literal string (implies --exact)
+    #[arg(short = 'F', long = "fixed-strings", conflicts_with_all = ["lines", "json", "compact"])]
+    fixed: bool,
+    /// Ignore case in an exact search
+    #[arg(short = 'i', long)]
+    ignore_case: bool,
+    /// Matches shown per file in an exact search; more are counted as `+N more`
+    #[arg(long, default_value_t = 5)]
+    per_file: usize,
     /// Print the plain format: path:start-end, score and the first lines of each chunk
     #[arg(long)]
     lines: bool,
@@ -117,6 +138,9 @@ async fn run_index(client: &Client, path: &Path) -> Result<ExitCode, String> {
 }
 
 async fn run_search(client: &Client, cli: &Cli) -> Result<ExitCode, String> {
+    if cli.exact || cli.fixed {
+        return run_exact(cli).await;
+    }
     let queries = facets(&cli.query, &cli.queries);
     if queries.is_empty() {
         return Err("no search terms given (try `ss walk files respecting gitignore`)".to_owned());
@@ -149,6 +173,9 @@ async fn run_search(client: &Client, cli: &Cli) -> Result<ExitCode, String> {
                 .any(|facet| !facet.records.is_empty());
             if cli.json {
                 println!("{}", findings_json(&findings, cli.budget));
+            } else if cli.compact {
+                let opts = Compact::lean(cli.budget.unwrap_or(COMPACT_BUDGET));
+                print!("{}", compact_text(&findings, &here, &opts));
             } else {
                 print!("{}", findings_text(&findings, &here, cli.budget));
             }
@@ -157,6 +184,25 @@ async fn run_search(client: &Client, cli: &Cli) -> Result<ExitCode, String> {
         Response::Error { message, .. } => Err(message),
         other => Err(format!("unexpected reply: {other:?}")),
     }
+}
+
+async fn run_exact(cli: &Cli) -> Result<ExitCode, String> {
+    let pattern = cli.query.join(" ");
+    if pattern.is_empty() {
+        return Err("no pattern given (try `ss --exact 'fn \\w+_files'`)".to_owned());
+    }
+    let regex = compile(&pattern, cli.fixed, cli.ignore_case).map_err(|error| error.to_string())?;
+    let here = std::env::current_dir().map_err(|error| error.to_string())?;
+    let scope = PathBuf::from(absolute(cli.path.as_deref().unwrap_or(&here))?);
+    let keep = cli.per_file;
+    let files = tokio::task::spawn_blocking(move || scan(&scope, &regex, keep))
+        .await
+        .map_err(|error| error.to_string())?;
+    print!(
+        "{}",
+        exact_text(&files, &here, cli.budget.unwrap_or(EXACT_BUDGET))
+    );
+    Ok(exit_for(!files.is_empty()))
 }
 
 async fn run_graph(

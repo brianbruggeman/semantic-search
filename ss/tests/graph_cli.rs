@@ -124,3 +124,114 @@ async fn graph_subcommand_lists_callers_and_exits_one_for_an_unknown_symbol() {
     );
     assert_eq!(none.status.code(), Some(1));
 }
+
+#[proxima::test(runtime = "tokio")]
+async fn compact_prints_each_file_once_stays_in_budget_and_names_what_it_cut() {
+    let env = indexed_env();
+
+    let output = text(&search(
+        &env,
+        &[
+            "--compact",
+            "--budget",
+            "120",
+            "-n",
+            "8",
+            "embed",
+            "pool",
+            "workers",
+        ],
+    ));
+
+    assert!(
+        tokens(&output) <= 120,
+        "{} tokens\n{output}",
+        tokens(&output)
+    );
+    assert!(output.contains("cut: "), "{output}");
+    assert!(output.contains("(use --budget 240)"), "{output}");
+    let files: Vec<&str> = output
+        .lines()
+        .filter(|line| line.contains('/') && !line.starts_with(' ') && !line.starts_with("cut"))
+        .collect();
+    let unique: std::collections::HashSet<&&str> = files.iter().collect();
+    assert_eq!(files.len(), unique.len(), "{output}");
+}
+
+#[proxima::test(runtime = "tokio")]
+async fn exact_runs_a_regex_scan_grouped_by_file_and_exits_one_without_a_match() {
+    let env = indexed_env();
+
+    let found = env.run(
+        "ss",
+        &[
+            "--path",
+            env.root().to_str().expect("utf8"),
+            "--exact",
+            r"^pub fn rrf_\w+\(",
+        ],
+    );
+    let none = env.run(
+        "ss",
+        &[
+            "--path",
+            env.root().to_str().expect("utf8"),
+            "--exact",
+            "zzz_no_such_text",
+        ],
+    );
+
+    let found_text = text(&found);
+    assert_eq!(found.status.code(), Some(0), "{found_text}");
+    assert!(
+        found_text.starts_with("1 matches in 1 files\n"),
+        "{found_text}"
+    );
+    assert!(found_text.contains("query.rs (1)\n  "), "{found_text}");
+    assert!(found_text.contains("pub fn rrf_fuse("), "{found_text}");
+    assert_eq!(none.status.code(), Some(1));
+}
+
+#[proxima::test(runtime = "tokio")]
+async fn fixed_strings_search_a_flood_inside_the_budget_and_report_the_cut() {
+    let env = indexed_env();
+
+    let output = text(&env.run(
+        "ss",
+        &[
+            "--path",
+            env.root().to_str().expect("utf8"),
+            "-F",
+            "--budget",
+            "150",
+            "fn ",
+        ],
+    ));
+
+    assert!(
+        tokens(&output) <= 150,
+        "{} tokens\n{output}",
+        tokens(&output)
+    );
+    assert!(output.contains("cut: "), "{output}");
+    assert!(output.contains("more\n"), "{output}");
+}
+
+#[proxima::test(runtime = "tokio")]
+async fn a_bad_regex_is_an_error_not_a_panic() {
+    let env = indexed_env();
+
+    let output = env.run(
+        "ss",
+        &[
+            "--path",
+            env.root().to_str().expect("utf8"),
+            "--exact",
+            "(unclosed",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("bad pattern"), "{stderr}");
+}
