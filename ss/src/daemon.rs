@@ -539,11 +539,15 @@ pub fn build_pool(settings: &Settings) -> EmbedPool {
             })
         }
         EmbedderKind::FastEmbed => {
-            let (cache, threads) = (settings.model_cache_dir(), settings.embed_threads);
+            let (cache, threads, profile) = (
+                settings.model_cache_dir(),
+                settings.embed_threads,
+                settings.embed_profile(),
+            );
             EmbedPool::with_lanes(
                 settings.embed_query_workers,
                 settings.embed_workers,
-                move || load_fastembed(&cache, threads),
+                move || load_fastembed(&cache, threads, profile),
             )
         }
     }

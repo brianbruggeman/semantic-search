@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-use crate::embed::{EmbedPool, EmbedderKind, hash_embed, load_fastembed};
+use crate::embed::{EmbedPool, EmbedProfile, EmbedderKind, hash_embed, load_fastembed};
 use crate::index::Shard;
 use crate::store::{Store, StoreConfig};
 
@@ -28,7 +28,9 @@ pub fn hash_pool() -> EmbedPool {
 }
 
 pub fn fastembed_pool(cache: PathBuf) -> EmbedPool {
-    EmbedPool::spawn(1, move || load_fastembed(&cache, 2))
+    EmbedPool::spawn(1, move || {
+        load_fastembed(&cache, 2, EmbedProfile::default())
+    })
 }
 
 pub fn copy_dir(from: &Path, to: &Path) {
@@ -68,7 +70,7 @@ fn corpus_from(pool: &EmbedPool, kind: EmbedderKind, fill: impl FnOnce(&Path)) -
     fill(&root);
     let config = StoreConfig {
         dir: dir.path().join("shard"),
-        model_id: kind.model_id().to_owned(),
+        model_id: EmbedProfile::default().store_id(kind),
     };
     let shard = Shard::new(&root, config, pool);
     Corpus { dir, shard }

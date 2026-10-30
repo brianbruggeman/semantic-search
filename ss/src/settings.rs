@@ -4,7 +4,7 @@ use conflaguration::Settings as ConfigSettings;
 use proxima::pipe::FailMode;
 use ss_ipc::Endpoint;
 
-use crate::embed::EmbedderKind;
+use crate::embed::{EmbedProfile, EmbedderKind, Provider};
 use crate::store::StoreConfig;
 
 /// Every tunable, loadable from `SS_*` environment variables (`SS_QUERY_CAP=4`) or built in code.
@@ -23,6 +23,12 @@ pub struct Settings {
     /// Embedding worker threads reserved for search queries, each owning a model; indexing never uses them
     #[setting(default = 1)]
     pub embed_query_workers: usize,
+    /// Where the fastembed model runs: `cpu` or `coreml` (macos GPU); changing it re-embeds every index
+    #[setting(default_str = "cpu")]
+    pub embed_provider: String,
+    /// Tokens kept per chunk before the model truncates it; changing it re-embeds every index
+    #[setting(default = 256)]
+    pub embed_max_length: usize,
     /// ONNX intra-op threads per embedding worker
     #[setting(default = 2)]
     pub embed_threads: usize,
@@ -113,6 +119,15 @@ impl Settings {
         EmbedderKind::parse(&self.embedder).unwrap_or_default()
     }
 
+    /// Unknown provider names fall back to `cpu`, the way unknown embedder names fall back to the default.
+    #[must_use]
+    pub fn embed_profile(&self) -> EmbedProfile {
+        EmbedProfile {
+            provider: Provider::parse(&self.embed_provider).unwrap_or_default(),
+            max_length: self.embed_max_length.max(1),
+        }
+    }
+
     #[must_use]
     pub fn query_fail_mode(&self) -> FailMode {
         parse_fail_mode(&self.query_overflow).unwrap_or(FailMode::DropNewest)
@@ -154,7 +169,7 @@ impl Settings {
         let short = digest.as_str().chars().take(16).collect::<String>();
         StoreConfig {
             dir: self.home_dir().join("roots").join(short),
-            model_id: self.embedder_kind().model_id().to_owned(),
+            model_id: self.embed_profile().store_id(self.embedder_kind()),
         }
     }
 
@@ -222,6 +237,31 @@ mod tests {
         assert_eq!(settings.index_fail_mode(), FailMode::DropOldest);
         assert_eq!(parse_fail_mode("refuse"), Some(FailMode::FailClosed));
         assert_eq!(parse_fail_mode("drop_newest"), Some(FailMode::DropNewest));
+    }
+
+    #[test]
+    fn embed_provider_and_max_length_reach_the_store_identity_and_default_to_cpu_256() {
+        let defaults =
+            temp_env::with_vars_unset(["SS_EMBED_PROVIDER", "SS_EMBED_MAX_LENGTH"], || {
+                Settings::from_env().expect("defaults")
+            });
+        let coreml = temp_env::with_vars(
+            [
+                ("SS_EMBED_PROVIDER", Some("coreml")),
+                ("SS_EMBED_MAX_LENGTH", Some("128")),
+            ],
+            || Settings::from_env().expect("coreml settings"),
+        );
+
+        let root = Path::new("/work/a");
+        assert_eq!(
+            defaults.store_config(root).model_id,
+            "bge-small-en-v1.5+cpu+len256"
+        );
+        assert_eq!(
+            coreml.store_config(root).model_id,
+            "bge-small-en-v1.5+coreml+len128"
+        );
     }
 
     #[test]

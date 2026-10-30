@@ -36,7 +36,6 @@ tree-sitter-typescript = "0.23.2"
 workspace = true
 
 [dev-dependencies]
-ort = { version = "=2.0.0-rc.15", default-features = false, features = ["coreml"] }
 proxima = { path = "../../../slot-0/proxima", package = "proxima-lib", default-features = false, features = ["test-support", "runtime-tokio", "tokio"] }
 temp-env = "0.3.6"
 tempfile = "3.27.0"
@@ -44,3 +43,6 @@ tokenizers = { version = "0.23.2", default-features = false, features = ["onig"]
 
 [target."cfg(unix)".dependencies]
 rustix = { version = "1.1.6", features = ["process"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["coreml"] }

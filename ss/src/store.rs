@@ -282,3 +282,99 @@ fn dot(query: &[f32], blob: &[u8]) -> f32 {
         .map(|(bytes, weight)| f32::from_le_bytes(*bytes) * weight)
         .sum()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::chunk_key;
+    use crate::embed::{EmbedProfile, EmbedderKind, Provider};
+
+    fn store_with_one_vector(dir: &Path, model_id: &str) -> Store {
+        let mut store = Store::open(&StoreConfig {
+            dir: dir.to_path_buf(),
+            model_id: model_id.to_owned(),
+        })
+        .expect("open store");
+        let text = "pub fn list_files(root: &Path) -> Vec<PathBuf> {}";
+        let key = chunk_key(text);
+        let chunk = RawChunk {
+            start_line: 1,
+            end_line: 1,
+            text: text.to_owned(),
+            key,
+        };
+        let row = FileRow {
+            mtime_ns: 1,
+            size: 1,
+            hash: key,
+        };
+        store
+            .replace_file("src/walk.rs", &row, &[chunk], &[(key, vec![1.0, 0.0])])
+            .expect("replace file");
+        store
+    }
+
+    fn reopen(dir: &Path, model_id: &str) -> Store {
+        Store::open(&StoreConfig {
+            dir: dir.to_path_buf(),
+            model_id: model_id.to_owned(),
+        })
+        .expect("reopen store")
+    }
+
+    #[test]
+    fn reopening_under_the_same_identity_keeps_the_vectors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = EmbedProfile::default().store_id(EmbedderKind::FastEmbed);
+        drop(store_with_one_vector(dir.path(), &id));
+
+        let store = reopen(dir.path(), &id);
+
+        assert_eq!(store.vector_count().expect("count"), 1);
+    }
+
+    #[test]
+    fn a_provider_or_max_length_change_wipes_vectors_so_they_are_never_mixed() {
+        let base = EmbedProfile::default();
+        let coreml = EmbedProfile {
+            provider: Provider::CoreMlGpu,
+            ..base
+        };
+        let shorter = EmbedProfile {
+            max_length: 128,
+            ..base
+        };
+        for changed in [coreml, shorter] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            drop(store_with_one_vector(
+                dir.path(),
+                &base.store_id(EmbedderKind::FastEmbed),
+            ));
+
+            let store = reopen(dir.path(), &changed.store_id(EmbedderKind::FastEmbed));
+
+            assert_eq!(
+                (
+                    store.vector_count().expect("vectors"),
+                    store.chunk_count().expect("chunks")
+                ),
+                (0, 0),
+                "{changed:?} reused vectors built under the default profile"
+            );
+        }
+    }
+
+    #[test]
+    fn store_identity_names_model_provider_and_max_length() {
+        let profile = EmbedProfile {
+            provider: Provider::CoreMlAll,
+            max_length: 128,
+        };
+
+        assert_eq!(
+            profile.store_id(EmbedderKind::FastEmbed),
+            "bge-small-en-v1.5+coreml_all+len128"
+        );
+        assert_eq!(profile.store_id(EmbedderKind::Hash), "feature-hash-256");
+    }
+}

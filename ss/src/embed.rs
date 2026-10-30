@@ -3,9 +3,13 @@ use std::sync::Arc;
 use std::thread;
 
 use fastembed::{
-    InitOptionsUserDefined, Pooling, QuantizationMode, TextEmbedding, TextInitOptions,
-    TokenizerFiles, UserDefinedEmbeddingModel,
+    ExecutionProviderDispatch, InitOptionsUserDefined, Pooling, QuantizationMode, TextEmbedding,
+    TextInitOptions, TokenizerFiles, UserDefinedEmbeddingModel,
 };
+#[cfg(target_os = "macos")]
+use ort::ep::CoreML;
+#[cfg(target_os = "macos")]
+use ort::ep::coreml::{ComputeUnits, ModelFormat};
 use proxima::pipe::Pipe;
 use thread_priority::{ThreadPriority, set_current_thread_priority};
 use tokio::sync::oneshot;
@@ -43,6 +47,69 @@ impl EmbedderKind {
             "fastembed" => Some(Self::FastEmbed),
             "hash" => Some(Self::Hash),
             _ => None,
+        }
+    }
+}
+
+/// Where the ONNX model runs. Vectors differ slightly between providers, so the choice is part of the store identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Provider {
+    #[default]
+    Cpu,
+    CoreMlGpu,
+    CoreMlAll,
+}
+
+impl Provider {
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::CoreMlGpu => "coreml",
+            Self::CoreMlAll => "coreml_all",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "cpu" => Some(Self::Cpu),
+            "coreml" => Some(Self::CoreMlGpu),
+            "coreml_all" => Some(Self::CoreMlAll),
+            _ => None,
+        }
+    }
+}
+
+/// The model-side knobs that change the vectors: execution provider and token truncation length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbedProfile {
+    pub provider: Provider,
+    pub max_length: usize,
+}
+
+impl Default for EmbedProfile {
+    fn default() -> Self {
+        Self {
+            provider: Provider::Cpu,
+            max_length: EMBED_MAX_TOKENS,
+        }
+    }
+}
+
+impl EmbedProfile {
+    /// The identity a store pins: a vector index built under one id is wiped, not mixed, when opened under another.
+    /// The hash embedder has no provider or truncation, so its id is just the model.
+    #[must_use]
+    pub fn store_id(self, kind: EmbedderKind) -> String {
+        match kind {
+            EmbedderKind::Hash => kind.model_id().to_owned(),
+            EmbedderKind::FastEmbed => format!(
+                "{}+{}+len{}",
+                kind.model_id(),
+                self.provider.name(),
+                self.max_length
+            ),
         }
     }
 }
@@ -253,19 +320,43 @@ fn flush(current: &mut String, found: &mut Vec<String>) {
 pub fn load_fastembed(
     cache_dir: &std::path::Path,
     intra_threads: usize,
+    profile: EmbedProfile,
 ) -> Result<impl FnMut(&[String]) -> EmbedOutput + use<>, EmbedError> {
+    let providers = execution_providers(profile.provider);
     let mut engine = match local_snapshot() {
-        Some(snapshot) => from_snapshot(&snapshot, intra_threads)?,
+        Some(snapshot) => from_snapshot(&snapshot, intra_threads, profile.max_length, providers)?,
         None => TextEmbedding::try_new(
             TextInitOptions::new(fastembed::EmbeddingModel::BGESmallENV15)
                 .with_cache_dir(cache_dir.to_path_buf())
-                .with_max_length(EMBED_MAX_TOKENS)
+                .with_max_length(profile.max_length)
                 .with_intra_threads(intra_threads)
+                .with_execution_providers(providers)
                 .with_show_download_progress(false),
         )
         .map_err(|error| EmbedError::Model(error.to_string()))?,
     };
     Ok(move |texts: &[String]| embed_by_length(&mut engine, texts))
+}
+
+#[cfg(target_os = "macos")]
+fn execution_providers(provider: Provider) -> Vec<ExecutionProviderDispatch> {
+    let units = match provider {
+        Provider::Cpu => return Vec::new(),
+        Provider::CoreMlGpu => ComputeUnits::CPUAndGPU,
+        Provider::CoreMlAll => ComputeUnits::All,
+    };
+    vec![
+        CoreML::default()
+            .with_compute_units(units)
+            .with_model_format(ModelFormat::MLProgram)
+            .build(),
+    ]
+}
+
+/// CoreML exists only on macos; elsewhere the model runs on the CPU provider.
+#[cfg(not(target_os = "macos"))]
+fn execution_providers(_provider: Provider) -> Vec<ExecutionProviderDispatch> {
+    Vec::new()
 }
 
 /// Indices of `texts` grouped `size` at a time, shortest text first, so each group pads to nearly its own length.
@@ -314,7 +405,12 @@ fn local_snapshot() -> Option<PathBuf> {
     explicit.or(discovered)
 }
 
-fn from_snapshot(dir: &std::path::Path, intra_threads: usize) -> Result<TextEmbedding, EmbedError> {
+fn from_snapshot(
+    dir: &std::path::Path,
+    intra_threads: usize,
+    max_length: usize,
+    providers: Vec<ExecutionProviderDispatch>,
+) -> Result<TextEmbedding, EmbedError> {
     let read = |name: &str| {
         std::fs::read(dir.join(name)).map_err(|error| EmbedError::Model(format!("{name}: {error}")))
     };
@@ -330,8 +426,9 @@ fn from_snapshot(dir: &std::path::Path, intra_threads: usize) -> Result<TextEmbe
     TextEmbedding::try_new_from_user_defined(
         model,
         InitOptionsUserDefined::new()
-            .with_max_length(EMBED_MAX_TOKENS)
-            .with_intra_threads(intra_threads),
+            .with_max_length(max_length)
+            .with_intra_threads(intra_threads)
+            .with_execution_providers(providers),
     )
     .map_err(|error| EmbedError::Model(error.to_string()))
 }
@@ -463,7 +560,9 @@ mod tests {
     async fn real_fastembed_model_ranks_the_walker_above_unrelated_code() {
         let cache = tempfile::tempdir().expect("model cache dir");
         let cache_path = cache.path().to_path_buf();
-        let pool = EmbedPool::spawn(1, move || load_fastembed(&cache_path, 2));
+        let pool = EmbedPool::spawn(1, move || {
+            load_fastembed(&cache_path, 2, EmbedProfile::default())
+        });
         let walker = "/// files honoring .gitignore\npub fn list_files(root: &Path) -> Vec<PathBuf> {\n    WalkBuilder::new(root).require_git(false).build().collect()\n}".to_owned();
         let unrelated = "fn parse_http_header(line: &str) -> Option<(String, String)> {\n    let (name, value) = line.split_once(':')?;\n    Some((name.trim().to_owned(), value.trim().to_owned()))\n}".to_owned();
         let query = "walk files respecting gitignore".to_owned();
