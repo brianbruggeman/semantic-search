@@ -7,13 +7,13 @@ use super::METHOD;
 use super::NodeKind;
 use super::walker::{Ctx, Def, Item, cap};
 
-pub fn classify<'t>(ctx: &Ctx<'_>, node: Node<'t>) -> Item<'t> {
+pub fn classify<'t>(ctx: &Ctx<'_>, node: Node<'t>, in_type: bool) -> Item<'t> {
     match node.kind() {
         "function_item" | "function_signature_item" => define(ctx, node, NodeKind::Function),
         "struct_item" | "union_item" => define(ctx, node, NodeKind::Struct),
         "enum_item" => define(ctx, node, NodeKind::Enum),
         "trait_item" => define(ctx, node, NodeKind::Trait),
-        "type_item" => define(ctx, node, NodeKind::Type),
+        "type_item" if !in_type => define(ctx, node, NodeKind::Type),
         "mod_item" => define(ctx, node, NodeKind::Module),
         "const_item" | "static_item" => define(ctx, node, NodeKind::Const),
         "impl_item" => implementation(ctx, node),

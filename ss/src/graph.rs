@@ -193,18 +193,29 @@ pub fn callee_fits(qual: &str, kind: NodeKind) -> bool {
     }
 }
 
-/// The module name a file contributes to qualified paths.
+/// The module name a file contributes: its stem, or its directory for the files that stand for the directory.
 #[must_use]
 pub fn file_module(rel: &str, language: Language) -> String {
     let mut parts = rel.rsplit('/');
     let file = parts.next().unwrap_or(rel);
     let parent = parts.next().unwrap_or("");
     let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
-    let dir_named = matches!(stem, "mod" | "lib" | "main" | "__init__" | "index");
-    match language {
-        Language::Go => parent,
-        _ if dir_named && !parent.is_empty() => parent,
-        _ => stem,
+    let directory = match language {
+        Language::Go => true,
+        Language::Rust => matches!(stem, "mod" | "lib" | "main"),
+        Language::Python => stem == "__init__",
+        Language::TypeScript | Language::Tsx | Language::JavaScript => stem == "index",
+    };
+    let crate_root = matches!(stem, "lib" | "main") && parent == "src";
+    let named = if crate_root {
+        parts.next().unwrap_or(parent)
+    } else {
+        parent
+    };
+    if directory && !named.is_empty() {
+        named
+    } else {
+        stem
     }
     .to_owned()
 }

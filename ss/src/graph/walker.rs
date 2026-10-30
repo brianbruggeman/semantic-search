@@ -103,7 +103,7 @@ pub fn extract_tree(language: Language, rel: &str, text: &str) -> FileGraph {
 
 fn classify<'t>(ctx: &Ctx<'_>, node: Node<'t>, scope_is_type: bool) -> Item<'t> {
     match ctx.language {
-        Language::Rust => rust::classify(ctx, node),
+        Language::Rust => rust::classify(ctx, node, scope_is_type),
         Language::Python => python::classify(ctx, node),
         Language::Go => golang::classify(ctx, node),
         Language::TypeScript | Language::Tsx | Language::JavaScript => {
