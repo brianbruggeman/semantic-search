@@ -189,7 +189,7 @@ fn forget_vanished(config: &StoreConfig, rel: &str) -> Result<Flow<SourceFile>, 
     )))
 }
 
-fn decode_text(bytes: Vec<u8>) -> Option<String> {
+pub(crate) fn decode_text(bytes: Vec<u8>) -> Option<String> {
     let head = bytes.get(..SNIFF_BYTES).unwrap_or(&bytes);
     if head.contains(&0) {
         return None;

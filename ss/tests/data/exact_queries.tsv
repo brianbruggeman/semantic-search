@@ -1,0 +1,21 @@
+# pattern<TAB>kind (regex|literal)<TAB>expected size class (flood = more than 40 matching lines in the corpus). Written before measuring.
+fn 	literal	flood
+use 	literal	flood
+self	literal	flood
+let 	literal	flood
+Result<	literal	flood
+rrf_fuse	literal	small
+EmbedPool	literal	small
+pub fn \w+_files\b	regex	small
+impl (\w+ for )?\w+	regex	small
+TODO|FIXME	regex	none
+#\[proxima::test	regex	medium
+Err\(\w+Error	regex	medium
+busy_timeout	literal	small
+^\s*///	regex	medium
+unwrap_or\w*\(	regex	medium
+Duration::from_(secs|millis)	regex	small
+struct \w+	regex	medium
+fn (new|open|load)\(	regex	small
+semantic_search_zzz	literal	none
+\bcrate::\w+	regex	medium

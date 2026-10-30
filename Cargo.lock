@@ -4358,6 +4358,7 @@ dependencies = [
  "ort",
  "proxima-lib",
  "proxima-telemetry",
+ "regex",
  "rusqlite",
  "rustix",
  "serde",

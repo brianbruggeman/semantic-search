@@ -6,6 +6,7 @@ pub mod context;
 pub mod daemon;
 pub mod embed;
 pub mod error;
+pub mod exact;
 pub mod graph;
 pub mod index;
 pub mod pipeline;
