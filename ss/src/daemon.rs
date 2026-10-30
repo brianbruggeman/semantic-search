@@ -9,7 +9,8 @@ use proxima::pipe::{Admission, DropReason, FailMode, Pipe, SinkFront};
 use proxima::telemetry::{info, warn};
 use ss_ipc::{InstanceLock, ListenerExt as _, Stream, listen};
 use ss_proto::{
-    DaemonStatus, ErrorKind, Frame, Hit, IndexStats, LineDecoder, Request, Response, encode_frame,
+    DaemonStatus, ErrorKind, Findings, Frame, GraphReply, Hit, IndexStats, LineDecoder, Request,
+    Response, encode_frame,
 };
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -19,7 +20,7 @@ use tokio::task::JoinHandle;
 use crate::embed::{EmbedPool, EmbedderKind, hash_embed, load_fastembed};
 use crate::error::IndexError;
 use crate::index::{Shard, index_changed, index_tree};
-use crate::query::search;
+use crate::query::{graph_reply, search, search_findings};
 use crate::registry::{Registry, WatchChange};
 use crate::settings::Settings;
 use crate::watch::{Batch, WatchHub};
@@ -169,12 +170,7 @@ impl Core {
         }
     }
 
-    async fn search_path(
-        &self,
-        query: &str,
-        path: &str,
-        limit: usize,
-    ) -> Result<Vec<Hit>, ServeError> {
+    async fn locate(&self, path: &str) -> Result<(PathBuf, Arc<Entry>), ServeError> {
         let scope = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
         let root = self
             .registry
@@ -183,8 +179,27 @@ impl Core {
             .resolve(&scope)
             .map(Path::to_path_buf);
         let root = root.ok_or_else(|| ServeError::NotIndexed(scope.display().to_string()))?;
-        let entry = self.entry(&root).await;
+        Ok((scope, self.entry(&root).await))
+    }
+
+    async fn search_path(
+        &self,
+        query: &str,
+        path: &str,
+        limit: usize,
+    ) -> Result<Vec<Hit>, ServeError> {
+        let (scope, entry) = self.locate(path).await?;
         Ok(search(&entry.shard, &scope, query, limit).await?)
+    }
+
+    async fn findings(&self, args: &QueryArgs) -> Result<Findings, ServeError> {
+        let (scope, entry) = self.locate(&args.path).await?;
+        Ok(search_findings(&entry.shard, &scope, &args.queries, args.limit).await?)
+    }
+
+    async fn graph(&self, args: &GraphArgs) -> Result<GraphReply, ServeError> {
+        let (scope, entry) = self.locate(&args.path).await?;
+        Ok(graph_reply(&entry.shard, &scope, &args.target, args.depth).await?)
     }
 
     async fn status(&self, queries_busy: u64, index_busy: u64) -> DaemonStatus {
@@ -331,6 +346,48 @@ impl Pipe for SearchPipe {
     }
 }
 
+pub struct QueryArgs {
+    pub queries: Vec<String>,
+    pub path: String,
+    pub limit: usize,
+}
+
+pub struct GraphArgs {
+    pub target: String,
+    pub path: String,
+    pub depth: u8,
+}
+
+/// `QueryArgs -> Findings`: the same hybrid ranking per query facet, each hit carrying its symbol and neighbours.
+pub struct FindingsPipe {
+    core: Arc<Core>,
+}
+
+impl Pipe for FindingsPipe {
+    type In = QueryArgs;
+    type Out = Findings;
+    type Err = ServeError;
+
+    async fn call(&self, input: Self::In) -> Result<Self::Out, Self::Err> {
+        self.core.findings(&input).await
+    }
+}
+
+/// `GraphArgs -> GraphReply`: the neighbourhood of a symbol or `path:line`.
+pub struct GraphPipe {
+    core: Arc<Core>,
+}
+
+impl Pipe for GraphPipe {
+    type In = GraphArgs;
+    type Out = GraphReply;
+    type Err = ServeError;
+
+    async fn call(&self, input: Self::In) -> Result<Self::Out, Self::Err> {
+        self.core.graph(&input).await
+    }
+}
+
 /// `String -> IndexStats`: index (or re-index) a directory, creating its root on first sight.
 pub struct IndexPipe {
     core: Arc<Core>,
@@ -348,6 +405,8 @@ impl Pipe for IndexPipe {
 
 enum Work {
     Search(SearchArgs),
+    Query(QueryArgs),
+    Graph(GraphArgs),
     Index(String),
 }
 
@@ -445,6 +504,18 @@ async fn execute(core: &Arc<Core>, work: Work) -> Response {
                 .await
                 .map(|hits| Response::Hits { hits }),
         ),
+        Work::Query(args) => reply(
+            FindingsPipe { core }
+                .call(args)
+                .await
+                .map(|findings| Response::Findings { findings }),
+        ),
+        Work::Graph(args) => reply(
+            GraphPipe { core }
+                .call(args)
+                .await
+                .map(|graph| Response::Graph { graph }),
+        ),
         Work::Index(path) => reply(
             IndexPipe { core }
                 .call(path)
@@ -482,6 +553,32 @@ impl Pipe for Router {
                     limit: limit as usize,
                 };
                 render(submit(&self.queries, &self.queries_wake, Work::Search(args)).await)
+            }
+            Request::Query {
+                queries,
+                path,
+                limit,
+            } => {
+                self.core.touch();
+                let args = QueryArgs {
+                    queries,
+                    path,
+                    limit: limit as usize,
+                };
+                render(submit(&self.queries, &self.queries_wake, Work::Query(args)).await)
+            }
+            Request::Graph {
+                target,
+                path,
+                depth,
+            } => {
+                self.core.touch();
+                let args = GraphArgs {
+                    target,
+                    path,
+                    depth,
+                };
+                render(submit(&self.queries, &self.queries_wake, Work::Graph(args)).await)
             }
             Request::Index { path } => {
                 render(submit(&self.indexing, &self.indexing_wake, Work::Index(path)).await)

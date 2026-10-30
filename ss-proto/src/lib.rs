@@ -5,10 +5,15 @@
 
 extern crate alloc;
 
+mod context;
 mod frame;
 mod message;
 mod stats;
 
+pub use context::{
+    Capped, EdgeRef, Facet, Findings, GraphReply, Member, Neighborhood, Record, Related, Resolved,
+    SCHEMA_VERSION, Symbol,
+};
 pub use frame::{FrameError, LineDecoder, MAX_FRAME_BYTES, encode_frame};
 pub use message::{DaemonStatus, ErrorKind, Frame, Request, Response};
 pub use stats::{Hit, IndexStats};

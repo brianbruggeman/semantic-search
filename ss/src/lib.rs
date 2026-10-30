@@ -2,6 +2,7 @@
 
 pub mod chunk;
 pub mod client;
+pub mod context;
 pub mod daemon;
 pub mod embed;
 pub mod error;

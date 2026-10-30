@@ -52,7 +52,7 @@ fn rust_source_yields_nodes_and_edges_with_signature_doc_and_chunk_key() {
         fuse.doc
     );
     assert!(fuse.chunk_key.is_some());
-    assert!(has_edge(&graph, EdgeKind::Calls, "query::scan", "rrf_fuse"));
+    assert!(has_edge(&graph, EdgeKind::Calls, "query::fuse", "rrf_fuse"));
     assert!(has_edge(
         &graph,
         EdgeKind::Imports,

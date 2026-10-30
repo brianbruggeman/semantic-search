@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+use crate::context::{Findings, GraphReply};
 use crate::stats::{Hit, IndexStats};
 
 /// One id-tagged message. The id pairs a response with its request; responses may arrive out of order.
@@ -19,6 +20,18 @@ pub enum Request {
         query: String,
         path: String,
         limit: u32,
+    },
+    /// Structured search: one result set per query, each hit with its symbol and neighbours (schema 1).
+    Query {
+        queries: Vec<String>,
+        path: String,
+        limit: u32,
+    },
+    /// The neighbourhood of a symbol name or `path:line` (schema 1).
+    Graph {
+        target: String,
+        path: String,
+        depth: u8,
     },
     Index {
         path: String,
@@ -47,6 +60,8 @@ pub enum ErrorKind {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
     Hits { hits: Vec<Hit> },
+    Findings { findings: Findings },
+    Graph { graph: GraphReply },
     Indexed { stats: IndexStats },
     Watches { paths: Vec<String> },
     Status { status: DaemonStatus },

@@ -3,7 +3,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use proxima::pipe::Pipe;
-use ss_proto::Hit;
+use ss_proto::{Capped, Facet, Findings, GraphReply, Hit, SCHEMA_VERSION};
+
+use crate::context;
 
 use crate::embed::{EmbedPool, EmbedRequest, Lane, tokens};
 use crate::error::IndexError;
@@ -43,10 +45,7 @@ pub async fn search(
     }
     let embedding = embed_query(shard.pool(), query).await?;
     let (config, root) = (Arc::clone(&shard.config), shard.root.clone());
-    let prefix = scope.strip_prefix(&root).map_or_else(
-        |_| String::new(),
-        |rel| rel.to_string_lossy().replace('\\', "/"),
-    );
+    let prefix = scope_prefix(scope, &root);
     tokio::task::spawn_blocking(move || scan(&config, &root, &embedding, &terms, &prefix, limit))
         .await
         .map_err(|error| IndexError::Join(error.to_string()))?
@@ -75,9 +74,136 @@ fn scan(
 ) -> Result<Vec<Hit>, IndexError> {
     let store = Store::open(config)?;
     let _snapshot = store.read_snapshot()?;
+    render_hits(
+        &store,
+        root,
+        &fuse(&store, embedding, terms, prefix)?,
+        limit,
+    )
+}
+
+/// The hybrid ranking shared by every reply shape: exact cosine scan + BM25, fused by RRF.
+fn fuse(
+    store: &Store,
+    embedding: &[f32],
+    terms: &[String],
+    prefix: &str,
+) -> Result<Vec<(i64, f64)>, IndexError> {
     let by_vector = store.vector_search(embedding, prefix, CANDIDATES)?;
     let by_text = store.text_search(terms, prefix, CANDIDATES)?;
-    render_hits(&store, root, &rrf_fuse(&[by_vector, by_text]), limit)
+    Ok(rrf_fuse(&[by_vector, by_text]))
+}
+
+fn scope_prefix(scope: &Path, root: &Path) -> String {
+    scope.strip_prefix(root).map_or_else(
+        |_| String::new(),
+        |rel| rel.to_string_lossy().replace('\\', "/"),
+    )
+}
+
+/// One query facet after embedding: its text, BM25 terms and query vector.
+struct Prepared {
+    query: String,
+    terms: Vec<String>,
+    embedding: Vec<f32>,
+}
+
+/// Structured search over several query facets in one call; each facet ranks exactly as `search` does.
+#[proxima::instrument]
+pub async fn search_findings(
+    shard: &Shard,
+    scope: &Path,
+    queries: &[String],
+    limit: usize,
+) -> Result<Findings, IndexError> {
+    let mut prepared = Vec::new();
+    for query in queries {
+        let terms = tokens(query);
+        let embedding = if terms.is_empty() {
+            Vec::new()
+        } else {
+            embed_query(shard.pool(), query).await?
+        };
+        prepared.push(Prepared {
+            query: query.clone(),
+            terms,
+            embedding,
+        });
+    }
+    let (config, root) = (Arc::clone(&shard.config), shard.root.clone());
+    let prefix = scope_prefix(scope, &root);
+    tokio::task::spawn_blocking(move || gather(&config, &root, &prepared, &prefix, limit))
+        .await
+        .map_err(|error| IndexError::Join(error.to_string()))?
+}
+
+#[proxima::instrument]
+fn gather(
+    config: &StoreConfig,
+    root: &Path,
+    prepared: &[Prepared],
+    prefix: &str,
+    limit: usize,
+) -> Result<Findings, IndexError> {
+    let store = Store::open(config)?;
+    let _snapshot = store.read_snapshot()?;
+    let mut facets = Vec::new();
+    for facet in prepared {
+        let fused = if facet.terms.is_empty() {
+            Vec::new()
+        } else {
+            fuse(&store, &facet.embedding, &facet.terms, prefix)?
+        };
+        let mut records = Vec::new();
+        for (index, (id, score)) in fused.iter().take(limit).enumerate() {
+            if let Some(chunk) = store.chunk(*id)? {
+                records.push(context::record(&store, root, index + 1, *score, &chunk)?);
+            }
+        }
+        facets.push(Facet {
+            query: facet.query.clone(),
+            records,
+        });
+    }
+    let all: Vec<&ss_proto::Record> = facets.iter().flat_map(|facet| &facet.records).collect();
+    let related = context::related(&all);
+    Ok(Findings {
+        schema: SCHEMA_VERSION,
+        facets,
+        related,
+    })
+}
+
+/// The neighbourhood of every symbol `target` names under `scope` (at most `LIST_CAP`, the rest counted).
+#[proxima::instrument]
+pub async fn graph_reply(
+    shard: &Shard,
+    scope: &Path,
+    target: &str,
+    depth: u8,
+) -> Result<GraphReply, IndexError> {
+    let (config, root) = (Arc::clone(&shard.config), shard.root.clone());
+    let (prefix, target) = (scope_prefix(scope, &root), target.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let store = Store::open(&config)?;
+        let _snapshot = store.read_snapshot()?;
+        let found = context::resolve_target(&store, &root, &prefix, &target)?;
+        let more = found.len().saturating_sub(context::LIST_CAP);
+        let mut items = Vec::new();
+        for node in found.iter().take(context::LIST_CAP) {
+            items.push(context::neighborhood(&store, &root, node, depth)?);
+        }
+        Ok(GraphReply {
+            schema: SCHEMA_VERSION,
+            neighborhoods: Capped {
+                items,
+                more: u32::try_from(more).unwrap_or(u32::MAX),
+                hidden: 0,
+            },
+        })
+    })
+    .await
+    .map_err(|error| IndexError::Join(error.to_string()))?
 }
 
 #[proxima::instrument]

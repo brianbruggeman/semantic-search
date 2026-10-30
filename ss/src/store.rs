@@ -8,6 +8,10 @@ use crate::chunk::{ChunkKey, RawChunk};
 use crate::error::IndexError;
 use crate::graph::{FileGraph, GraphEdge, GraphNode};
 
+mod graph_read;
+
+pub use graph_read::{EdgeRow, NodeRow};
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, mtime_ns INTEGER NOT NULL, size INTEGER NOT NULL, hash BLOB NOT NULL);
@@ -49,6 +53,7 @@ pub struct FileRow {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkRow {
+    pub key: ChunkKey,
     pub path: String,
     pub start_line: u32,
     pub end_line: u32,
@@ -301,10 +306,12 @@ impl Store {
     pub fn chunk(&self, id: i64) -> rusqlite::Result<Option<ChunkRow>> {
         self.conn
             .query_row(
-                "SELECT path, start_line, end_line, text FROM chunks WHERE id=?1",
+                "SELECT path, start_line, end_line, text, key FROM chunks WHERE id=?1",
                 [id],
                 |row| {
+                    let key: Vec<u8> = row.get(4)?;
                     Ok(ChunkRow {
+                        key: key.try_into().unwrap_or([0; 32]),
                         path: row.get(0)?,
                         start_line: row.get(1)?,
                         end_line: row.get(2)?,
