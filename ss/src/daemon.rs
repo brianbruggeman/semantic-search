@@ -114,7 +114,8 @@ impl Core {
         let pool = &self.pool;
         Arc::clone(shards.entry(root.to_path_buf()).or_insert_with(|| {
             Arc::new(Entry {
-                shard: Shard::new(root, settings.store_config(root), pool),
+                shard: Shard::new(root, settings.store_config(root), pool)
+                    .with_graph_boost(settings.graph_boost),
                 writer: Mutex::new(()),
             })
         }))

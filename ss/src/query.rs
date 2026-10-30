@@ -15,6 +15,8 @@ use crate::store::{Store, StoreConfig};
 pub const RRF_K: f64 = 60.0;
 pub const CANDIDATES: usize = 50;
 pub const PREVIEW_LINES: usize = 3;
+/// How many fused hits `graph_boost` looks across for chunks that point at each other.
+pub const BOOST_POOL: usize = 20;
 
 /// Reciprocal rank fusion of best-first id lists; returns ids with fused score, best first.
 #[must_use]
@@ -46,9 +48,12 @@ pub async fn search(
     let embedding = embed_query(shard.pool(), query).await?;
     let (config, root) = (Arc::clone(&shard.config), shard.root.clone());
     let prefix = scope_prefix(scope, &root);
-    tokio::task::spawn_blocking(move || scan(&config, &root, &embedding, &terms, &prefix, limit))
-        .await
-        .map_err(|error| IndexError::Join(error.to_string()))?
+    let boost = shard.graph_boost();
+    tokio::task::spawn_blocking(move || {
+        scan(&config, &root, &embedding, &terms, &prefix, (limit, boost))
+    })
+    .await
+    .map_err(|error| IndexError::Join(error.to_string()))?
 }
 
 /// Waits in the query lane for a worker, then embeds the query text; the span covers both the wait and the model.
@@ -70,14 +75,14 @@ fn scan(
     embedding: &[f32],
     terms: &[String],
     prefix: &str,
-    limit: usize,
+    (limit, boost): (usize, bool),
 ) -> Result<Vec<Hit>, IndexError> {
     let store = Store::open(config)?;
     let _snapshot = store.read_snapshot()?;
     render_hits(
         &store,
         root,
-        &fuse(&store, embedding, terms, prefix)?,
+        &fuse(&store, embedding, terms, prefix, boost)?,
         limit,
     )
 }
@@ -88,10 +93,16 @@ fn fuse(
     embedding: &[f32],
     terms: &[String],
     prefix: &str,
+    boost: bool,
 ) -> Result<Vec<(i64, f64)>, IndexError> {
     let by_vector = store.vector_search(embedding, prefix, CANDIDATES)?;
     let by_text = store.text_search(terms, prefix, CANDIDATES)?;
-    Ok(rrf_fuse(&[by_vector, by_text]))
+    let fused = rrf_fuse(&[by_vector.clone(), by_text.clone()]);
+    if !boost {
+        return Ok(fused);
+    }
+    let neighbors = context::connected_in_pool(store, &fused, BOOST_POOL)?;
+    Ok(rrf_fuse(&[by_vector, by_text, neighbors]))
 }
 
 fn scope_prefix(scope: &Path, root: &Path) -> String {
@@ -132,7 +143,8 @@ pub async fn search_findings(
     }
     let (config, root) = (Arc::clone(&shard.config), shard.root.clone());
     let prefix = scope_prefix(scope, &root);
-    tokio::task::spawn_blocking(move || gather(&config, &root, &prepared, &prefix, limit))
+    let boost = shard.graph_boost();
+    tokio::task::spawn_blocking(move || gather(&config, &root, &prepared, &prefix, (limit, boost)))
         .await
         .map_err(|error| IndexError::Join(error.to_string()))?
 }
@@ -143,7 +155,7 @@ fn gather(
     root: &Path,
     prepared: &[Prepared],
     prefix: &str,
-    limit: usize,
+    (limit, boost): (usize, bool),
 ) -> Result<Findings, IndexError> {
     let store = Store::open(config)?;
     let _snapshot = store.read_snapshot()?;
@@ -152,7 +164,7 @@ fn gather(
         let fused = if facet.terms.is_empty() {
             Vec::new()
         } else {
-            fuse(&store, &facet.embedding, &facet.terms, prefix)?
+            fuse(&store, &facet.embedding, &facet.terms, prefix, boost)?
         };
         let mut records = Vec::new();
         for (index, (id, score)) in fused.iter().take(limit).enumerate() {

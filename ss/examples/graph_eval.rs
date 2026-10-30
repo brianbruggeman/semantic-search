@@ -213,14 +213,22 @@ async fn measure(shard: &Shard, root: &Path, config: &StoreConfig, gold: &Gold) 
         ));
     }
     let (outgoing, incoming, siblings) = follow_ups(&store, root, &node).expect("follow ups");
-    let mut names: Vec<String> = outgoing.iter().map(|e| e.name.clone()).collect();
-    names.extend(
+    let by_category: [HashSet<String>; 3] = [
+        outgoing.iter().map(|e| e.name.clone()).collect(),
         incoming
             .iter()
-            .map(|e| e.name.rsplit("::").next().unwrap_or(&e.name).to_owned()),
-    );
-    names.extend(siblings.iter().map(|m| m.name.clone()));
-    let distinct: HashSet<String> = names.into_iter().collect();
+            .map(|e| e.name.rsplit("::").next().unwrap_or(&e.name).to_owned())
+            .collect(),
+        siblings.iter().map(|m| m.name.clone()).collect(),
+    ];
+    for (slot, names) in by_category.iter().enumerate() {
+        let found = names
+            .iter()
+            .filter(|name| present_with_site(&wide_text, name))
+            .count();
+        row.categories[slot] = (names.len(), found);
+    }
+    let distinct: HashSet<String> = by_category.iter().flatten().cloned().collect();
     row.targets = distinct.len();
     for name in &distinct {
         let new_any = present_anywhere(&wide_text, name);
@@ -373,6 +381,19 @@ fn sufficiency(rows: &[Row], root: &Path) {
         "M6 >= 80% targets present, name with :line on its line: new {} old {}",
         pass(&|r| r.strict.0),
         pass(&|r| r.strict.1)
+    );
+    let shown: Vec<&&Row> = with_targets.iter().filter(|r| r.name_sig.0).collect();
+    println!(
+        "M6 restricted to the {} queries whose gold symbol is in the top 5: >= 80% present (name with :line) new {}, old {}",
+        shown.len(),
+        shown
+            .iter()
+            .filter(|r| share(r.strict.0, r.targets) >= SUFFICIENT)
+            .count(),
+        shown
+            .iter()
+            .filter(|r| share(r.strict.1, r.targets) >= SUFFICIENT)
+            .count()
     );
     let total: usize = with_targets.iter().map(|r| r.targets).sum();
     println!(

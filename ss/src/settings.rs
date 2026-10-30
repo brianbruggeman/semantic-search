@@ -71,6 +71,9 @@ pub struct Settings {
     /// Seconds of event silence after which a watched root is fully rescanned anyway; zero disables
     #[setting(default = 300)]
     pub rescan_secs: u64,
+    /// Adds a rank contribution to chunks whose callers, callees or container also rank in the fused top 20
+    #[setting(default = false)]
+    pub graph_boost: bool,
     /// Path to the `ssd` binary; empty selects the sibling of the running executable
     #[setting(default_str = "")]
     pub daemon_bin: String,
@@ -186,6 +189,19 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_boost_is_off_by_default_and_on_with_the_env_variable() {
+        let off = temp_env::with_vars_unset(["SS_GRAPH_BOOST"], || {
+            Settings::from_env().expect("defaults")
+        });
+        let on = temp_env::with_vars([("SS_GRAPH_BOOST", Some("true"))], || {
+            Settings::from_env().expect("settings from env")
+        });
+
+        assert!(!off.graph_boost);
+        assert!(on.graph_boost);
+    }
 
     #[test]
     fn env_overrides_defaults_and_equals_the_fluent_build() {

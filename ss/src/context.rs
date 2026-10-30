@@ -378,6 +378,54 @@ fn importers(store: &Store, root: &Path, node: &NodeRow) -> Found<Vec<EdgeRef>> 
     Ok(listed)
 }
 
+/// Where a chunk's symbol touches the rest of the graph through exact edges: callee definitions, caller sites, its container.
+fn touch_sites(store: &Store, root: &Path, node: &NodeRow) -> Found<Vec<(String, u32)>> {
+    let (outgoing, _) = callees(store, root, node, 1)?;
+    let mut sites: Vec<(String, u32)> = outgoing
+        .into_iter()
+        .filter_map(|(_, target)| target.map(|row| (row.file, row.node.start_line)))
+        .collect();
+    for (entry, caller) in incoming(store, root, node, &[EdgeKind::Calls])? {
+        if let (Resolved::Exact, Some(row)) = (entry.resolved, caller) {
+            sites.push((row.file, row.node.start_line));
+        }
+    }
+    let container = match node.node.qpath.rsplit_once("::") {
+        Some((parent, _)) => store.node_by_qpath(&node.file, parent)?,
+        None => None,
+    };
+    sites.extend(container.map(|row| (row.file, row.node.start_line)));
+    Ok(sites)
+}
+
+/// The ids among the first `pool` of `fused` whose symbol is linked (callee, caller or container, exact edges only)
+/// to the symbol of another chunk in the same pool, in fused order: the third list of a graph-aware fusion.
+pub fn connected_in_pool(store: &Store, fused: &[(i64, f64)], pool: usize) -> Found<Vec<i64>> {
+    let mut rows = Vec::new();
+    for (id, _) in fused.iter().take(pool) {
+        if let Some(chunk) = store.chunk(*id)? {
+            rows.push((*id, chunk));
+        }
+    }
+    let mut connected = Vec::new();
+    for (id, chunk) in &rows {
+        let Some(node) = store.primary_node(&chunk.path, chunk.start_line, chunk.end_line)? else {
+            continue;
+        };
+        let sites = touch_sites(store, Path::new(""), &node)?;
+        let linked = rows.iter().any(|(other, held)| {
+            other != id
+                && sites.iter().any(|(file, line)| {
+                    *file == held.path && held.start_line <= *line && *line <= held.end_line
+                })
+        });
+        if linked {
+            connected.push(*id);
+        }
+    }
+    Ok(connected)
+}
+
 /// Symbols that several hits point at and that are not hits themselves, most-mentioned first.
 #[must_use]
 pub fn related(records: &[&Record]) -> Capped<Related> {
@@ -605,6 +653,28 @@ mod tests {
             .expect("graph");
 
         assert_eq!(reply.neighborhoods.items[0].symbol.name, "rrf_fuse");
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn chunks_whose_symbols_call_each_other_are_connected_within_the_pool() {
+        let corpus = indexed().await;
+        let store = Store::open(&corpus.shard.config).expect("open");
+        let ids = store
+            .text_search(&["rrf".to_owned(), "fuse".to_owned()], "", 30)
+            .expect("text search");
+        let fused: Vec<(i64, f64)> = ids.iter().map(|id| (*id, 0.0)).collect();
+
+        let connected = connected_in_pool(&store, &fused, 20).expect("connected");
+
+        assert!(
+            !connected.is_empty(),
+            "rrf_fuse, fuse and the rrf tests call each other"
+        );
+        assert!(
+            connected
+                .iter()
+                .all(|id| ids.iter().take(20).any(|pooled| pooled == id))
+        );
     }
 
     #[test]

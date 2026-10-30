@@ -21,6 +21,7 @@ pub struct Shard {
     pub config: Arc<StoreConfig>,
     pool: EmbedPool,
     pipeline: Arc<FilePipeline>,
+    graph_boost: bool,
 }
 
 impl Shard {
@@ -33,7 +34,20 @@ impl Shard {
             config,
             pool: pool.clone(),
             pipeline,
+            graph_boost: false,
         }
+    }
+
+    /// Turns on the graph-aware rank contribution for this shard's searches (off by default).
+    #[must_use]
+    pub fn with_graph_boost(mut self, on: bool) -> Self {
+        self.graph_boost = on;
+        self
+    }
+
+    #[must_use]
+    pub fn graph_boost(&self) -> bool {
+        self.graph_boost
     }
 
     #[must_use]
