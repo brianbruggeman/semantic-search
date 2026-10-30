@@ -69,3 +69,13 @@ Stages carry `#[proxima::instrument]`; each index run adds `chunks_seen/embedded
 ## abandoned
 Per-call embedding in the CLI; an embedder trait (it is a pipe); `Mutex<TextEmbedding>` (worker threads own models);
 sqlite-vec (exact scan suffices); `CreditGate` and a bespoke `Admit` wrapper for admission. Unverifiable here: Windows runtime behavior.
+
+## embedding profile and store identity
+`SS_EMBED_PROVIDER` (`cpu` default, `coreml` = CPU+GPU, `coreml_all` = CPU+GPU+ANE; macOS only, other platforms run the CPU provider)
+and `SS_EMBED_MAX_LENGTH` (256) feed `EmbedProfile`. The store pins `bge-small-en-v1.5+<provider>+len<max_length>`
+(`EmbedProfile::store_id`); opening a shard under a different id wipes vectors, chunks and files so vectors from two
+profiles are never mixed. Measured on the 329-chunk frozen corpus `ss/tests/data/corpus` with 44 gold queries
+(`ss/tests/data/queries.tsv`, `ss/examples/embed_eval.rs`): CoreML vectors match CPU to 3.4e-7 max abs and rank identically but the
+cold index was 3.4% faster (gpu) or 7.2% slower (all), so CPU stays the default; 128 tokens halves the index time and
+lowers hit@3 (hybrid 0.636 -> 0.523), so 256 stays. Prefixing the embedded text with `path: symbol` raised hybrid hit@3
+0.636 -> 0.750 but lowered hybrid hit@5 0.795 -> 0.773 (11 of 44 queries ranked worse), so it was not kept.
