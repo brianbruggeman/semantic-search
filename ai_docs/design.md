@@ -79,3 +79,25 @@ profiles are never mixed. Measured on the 329-chunk frozen corpus `ss/tests/data
 cold index was 3.3% faster (gpu) or 7.2% slower (all), so CPU stays the default; 128 tokens halves the index time and
 lowers hit@3 (hybrid 0.636 -> 0.523), so 256 stays. Prefixing the embedded text with `path: symbol` raised hybrid hit@3
 0.636 -> 0.750 but lowered hybrid hit@5 0.795 -> 0.773 (11 of 44 queries ranked worse), so it was not kept.
+
+## embedded text format variants (not adopted)
+Rule fixed before running: keep a variant only if hybrid hit@3 or MRR improves and no hybrid or vector-only hit@1, hit@3, hit@5 or MRR drops;
+chosen on the dev half (gold chunk start line odd, 26 queries), then required not to regress on the held-out half (even, 18 queries).
+CPU, max_length 256, 329-chunk frozen corpus, 44 queries, embedded text only (stored text and FTS stay plain). Hybrid hit@1/hit@3/hit@5/MRR:
+
+| variant | dev | held-out | all 44 |
+|---|---|---|---|
+| plain (baseline) | .385 .577 .731 .527 | .444 .722 .889 .625 | .409 .636 .795 .567 |
+| `path: symbol` before text | .462 .769 .769 .618 pass | .389 .722 .778 .581 fail | .432 .750 .773 .603 fail |
+| a: path before text | .462 .731 .769 .613 pass | .278 .667 .778 .523 fail | .386 .705 .773 .576 fail |
+| b: symbol before text | .500 .731 .769 .638 pass | .444 .722 .778 .608 fail | .477 .727 .773 .626 fail |
+| c: `path: symbol` after text | .346 .577 .692 .507 fail | .611 .778 .944 .736 pass | .455 .659 .795 .601 pass |
+| d: `// path` `// symbol` before text | .462 .731 .769 .622 pass | .500 .778 .833 .646 fail | .477 .750 .795 .632 pass |
+| e: dir+stem words, symbol words | .462 .731 .808 .621 pass | .444 .722 .722 .576 fail | .455 .727 .773 .603 fail |
+| f1: symbol words only | .500 .731 .808 .635 pass | .389 .667 .833 .571 fail | .455 .705 .818 .609 pass |
+| f2: file stem + symbol words | .462 .731 .846 .622 pass | .444 .667 .722 .587 fail | .455 .705 .795 .608 pass |
+
+Best dev hybrid MRR among dev-passing variants is b, which drops held-out hybrid hit@5 (.889 -> .778) and MRR, so no variant is adopted and the
+embedded text stays the plain chunk. Every dev-passing variant fails on the held-out half and the only held-out passer (c) fails on dev,
+so the single-set passes (c, d, f1, f2 on all 44) do not carry across the split. The walker query (`walk files respecting gitignore`,
+held-out) moves hybrid 5 -> 2..4 under every variant but c (5) and vector 3 -> 1..2 under every variant.
