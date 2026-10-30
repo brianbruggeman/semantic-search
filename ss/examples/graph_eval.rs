@@ -461,11 +461,11 @@ fn sufficiency(rows: &[Row], root: &Path) {
     }
 }
 
-async fn run_edges(out: &Path) {
+async fn run_edges(out: &Path, source: &Path) {
     let work = tempfile::tempdir().expect("work dir");
     let pool = EmbedPool::spawn(2, || Ok(ss::embed::hash_embed));
     let root = work.path().join("tree");
-    copy_dir(&data_dir().join("corpus"), &root);
+    copy_dir(source, &root);
     let config = StoreConfig {
         dir: work.path().join("shard"),
         model_id: EmbedProfile::default().store_id(EmbedderKind::Hash),
@@ -500,7 +500,12 @@ async fn run_edges(out: &Path) {
         ));
     }
     std::fs::write(out, lines.join("\n") + "\n").expect("write edges");
-    println!("resolved call/import edges: {}", lines.len());
+    println!(
+        "resolved call/import edges: {}; nodes {} edges {} (all kinds, all resolutions)",
+        lines.len(),
+        store.node_count().expect("nodes"),
+        store.edge_count().expect("edges")
+    );
 }
 
 #[tokio::main]
@@ -509,7 +514,12 @@ async fn main() {
     let out = PathBuf::from(args.get(2).expect("output path"));
     match args.get(1).map(String::as_str) {
         Some("tokens") => run_tokens(&out).await,
-        Some("edges") => run_edges(&out).await,
+        Some("edges") => {
+            let source = args
+                .get(3)
+                .map_or_else(|| data_dir().join("corpus"), PathBuf::from);
+            run_edges(&out, &source).await;
+        }
         other => panic!("usage: graph_eval tokens|edges <out>, got {other:?}"),
     }
 }
