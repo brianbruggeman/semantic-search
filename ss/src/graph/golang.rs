@@ -5,8 +5,8 @@
 use tree_sitter::Node;
 
 use super::NodeKind;
-use super::last_segment;
 use super::walker::{Ctx, Def, Item, cap};
+use super::{METHOD, last_segment};
 
 pub fn classify<'t>(ctx: &Ctx<'_>, node: Node<'t>) -> Item<'t> {
     match node.kind() {
@@ -88,7 +88,7 @@ fn call<'t>(ctx: &Ctx<'_>, node: Node<'t>) -> Item<'t> {
         "identifier" => (ctx.text(function).to_owned(), String::new()),
         "selector_expression" => (
             ctx.field(function, "field").to_owned(),
-            ctx.field(function, "operand").to_owned(),
+            operand(ctx, function),
         ),
         _ => return Item::Other,
     };
@@ -96,6 +96,14 @@ fn call<'t>(ctx: &Ctx<'_>, node: Node<'t>) -> Item<'t> {
         dst,
         qual,
         opens_test: false,
+    }
+}
+
+fn operand(ctx: &Ctx<'_>, selector: Node<'_>) -> String {
+    let operand = selector.child_by_field_name("operand");
+    match operand {
+        Some(node) if node.kind() == "identifier" => ctx.text(node).to_owned(),
+        _ => METHOD.to_owned(),
     }
 }
 

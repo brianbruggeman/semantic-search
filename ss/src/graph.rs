@@ -32,7 +32,7 @@ impl NodeKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
-            Self::Module => "module",
+            Self::Module => "mod",
             Self::Struct => "struct",
             Self::Enum => "enum",
             Self::Trait => "trait",
@@ -102,6 +102,9 @@ pub struct FileGraph {
     pub edges: Vec<GraphEdge>,
 }
 
+/// Qualifier of a call whose receiver is not a name (`a.b().c()`): the callee can only be a method of unknown type.
+pub const METHOD: &str = ".";
+
 /// How many definitions a name-only edge could mean: one, several, or none in the index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
@@ -165,6 +168,29 @@ fn chunk_containing(chunks: &[RawChunk], line: u32) -> Option<ChunkKey> {
         .iter()
         .find(|chunk| chunk.start_line <= line && line <= chunk.end_line)
         .map(|chunk| chunk.key)
+}
+
+/// A name-only edge whose receiver type is unknown can never be `exact`: a unique definition does not prove it is the target.
+#[must_use]
+pub fn resolution_of(qual: &str, candidates: usize) -> Resolution {
+    match (Resolution::of(candidates), qual) {
+        (Resolution::Exact, METHOD) => Resolution::Ambiguous,
+        (other, _) => other,
+    }
+}
+
+/// Which definitions a call can name given how it was written: a bare call is a free function or constructor,
+/// a receiver call (`self.f()`, `x.f()`) is a method, a path call (`Type::f()`, `module::f()`) is either.
+#[must_use]
+pub fn callee_fits(qual: &str, kind: NodeKind) -> bool {
+    match qual {
+        "" => matches!(
+            kind,
+            NodeKind::Function | NodeKind::Struct | NodeKind::Type | NodeKind::Enum
+        ),
+        METHOD | "self" => kind == NodeKind::Method,
+        _ => kind.callable(),
+    }
 }
 
 /// The module name a file contributes to qualified paths.

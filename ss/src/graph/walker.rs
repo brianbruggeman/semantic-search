@@ -220,10 +220,10 @@ impl<'c, 's> Walker<'c, 's> {
             let inner = Scope {
                 qpath: qpath.clone(),
                 owner: qpath,
-                within: if kind.callable() {
-                    Within::Callable
-                } else {
-                    Within::Type
+                within: match kind {
+                    NodeKind::Module => Within::Namespace,
+                    _ if kind.callable() => Within::Callable,
+                    _ => Within::Type,
                 },
                 test: scope.test || def.test,
             };

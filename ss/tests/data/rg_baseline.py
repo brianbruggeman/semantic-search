@@ -343,7 +343,7 @@ def cmd_sstime(tree, home, bin_dir, index_timeout, hits_out):
     print(f"uptime_after_warm: {uptime()}")
     if hits_out:
         for query in queries:
-            ms, code, out = timed([ss, "--path", tree, "-n", "50", "--json", *query["text"].split()], env, tree, 120)
+            ms, code, out = timed([ss, "--path", tree, "-n", "50", "--lines", "--json", *query["text"].split()], env, tree, 120)
             hits[query["text"]] = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
         json.dump(hits, open(hits_out, "w"))
     timed([os.path.join(bin_dir, "ssd"), "stop"], env, tree, 30)

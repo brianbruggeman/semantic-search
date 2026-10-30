@@ -5,7 +5,7 @@
 use tree_sitter::Node;
 
 use super::walker::{Ctx, Def, Item, cap};
-use super::{EdgeKind, NodeKind, last_segment};
+use super::{EdgeKind, METHOD, NodeKind, last_segment};
 
 const TEST_CALLS: [&str; 3] = ["it", "test", "describe"];
 
@@ -191,7 +191,7 @@ fn receiver(ctx: &Ctx<'_>, member: Node<'_>) -> String {
     match object {
         Some(node) if node.kind() == "this" => "self".to_owned(),
         Some(node) if node.kind() == "identifier" => ctx.text(node).to_owned(),
-        _ => String::new(),
+        _ => METHOD.to_owned(),
     }
 }
 

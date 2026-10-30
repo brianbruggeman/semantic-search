@@ -4,7 +4,7 @@
 use tree_sitter::Node;
 
 use super::walker::{Ctx, Def, Item, cap};
-use super::{EdgeKind, NodeKind, last_segment};
+use super::{EdgeKind, METHOD, NodeKind, last_segment};
 
 pub fn classify<'t>(ctx: &Ctx<'_>, node: Node<'t>) -> Item<'t> {
     match node.kind() {
@@ -143,7 +143,7 @@ fn receiver(ctx: &Ctx<'_>, attribute: Node<'_>) -> String {
             "self" | "cls" => "self".to_owned(),
             other => other.to_owned(),
         },
-        _ => String::new(),
+        _ => METHOD.to_owned(),
     }
 }
 

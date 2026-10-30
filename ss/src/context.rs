@@ -11,7 +11,7 @@ use std::path::Path;
 use ss_proto::{Capped, EdgeRef, Member, Neighborhood, Record, Related, Resolved, Symbol};
 
 use crate::error::IndexError;
-use crate::graph::{EdgeKind, NodeKind, Resolution, qual_matches};
+use crate::graph::{EdgeKind, NodeKind, Resolution, callee_fits, qual_matches, resolution_of};
 use crate::store::{ChunkRow, EdgeRow, NodeRow, Store};
 
 pub const LIST_CAP: usize = 5;
@@ -69,11 +69,11 @@ fn resolved_of(resolution: Resolution) -> Resolved {
 
 /// The definitions an edge's written name could mean, given its qualifier.
 fn candidates(store: &Store, edge: &EdgeRow) -> Found<Vec<NodeRow>> {
-    let callable = matches!(edge.edge.kind, EdgeKind::Calls | EdgeKind::Tests);
+    let call = matches!(edge.edge.kind, EdgeKind::Calls | EdgeKind::Tests);
     Ok(store
         .nodes_named(&edge.edge.dst)?
         .into_iter()
-        .filter(|row| !callable || row.node.kind.callable())
+        .filter(|row| !call || callee_fits(&edge.edge.qual, row.node.kind))
         .filter(|row| qual_matches(&edge.edge.qual, &row.node.qpath, row.file == edge.file))
         .collect())
 }
@@ -99,7 +99,7 @@ fn callees(store: &Store, root: &Path, node: &NodeRow, depth: u8) -> Found<(Link
     let (mut found, mut hidden) = (Vec::new(), 0);
     for edge in edges {
         let mut targets = candidates(store, &edge)?;
-        let resolution = Resolution::of(targets.len());
+        let resolution = resolution_of(&edge.edge.qual, targets.len());
         if resolution == Resolution::Unresolved {
             hidden += 1;
             continue;
@@ -142,7 +142,7 @@ fn incoming(store: &Store, root: &Path, node: &NodeRow, kinds: &[EdgeKind]) -> F
                 name,
                 path: absolute(root, &edge.file),
                 line,
-                resolved: resolved_of(Resolution::of(targets.len())),
+                resolved: resolved_of(resolution_of(&edge.edge.qual, targets.len())),
                 depth: 1,
             },
             caller,

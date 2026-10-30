@@ -31,12 +31,13 @@ neighbours an agent would otherwise `rg` for (callers, callees, container member
   `Item` and one walker owns scope, so the languages share the qpath, edge-dedup and containment logic.
 
 ## honesty rule
-`calls`, `imports`, `tests` edges are NAME-RESOLVED ONLY. The row stores the name as written. At read time the candidates
-are the nodes with that name (callable kinds for calls), narrowed by the written qualifier (`query::f`, `Self::f`, `self.f`,
-`os.path.f`: the last qualifier segment must be a segment of the candidate's `qpath`; `self`/`Self` means same file; no
-candidate matching = no edge target). `resolved` = `exact` (one candidate), `ambiguous` (several), `unresolved` (none: std,
-other crates, locals). Text output lists exact and ambiguous (marked `?`) and omits unresolved; `--json` keeps all three.
-Resolution is computed at read time, not stored, so it never goes stale when another file changes.
+`calls`, `imports`, `tests` edges are NAME-RESOLVED ONLY. The row stores the name as written plus its qualifier. At read time
+the candidates are the nodes of that name, narrowed by how the call was written: bare `f()` -> fn/struct/type/enum; receiver
+`x.f()` (type unknown, qualifier `.`) or `self.f()` -> methods (`self`: same file); path `T::f()`/`mod.f()` -> fn or method
+whose `qpath` has the qualifier's last segment. `exact` = one candidate, `ambiguous` = several, `unresolved` = none (std,
+other crates, locals). A receiver-unknown call is never `exact`: one definition does not prove it is the target. Text output
+lists exact and ambiguous (marked `?`); unresolved edges are not listed, they are counted in `hidden`. Nothing is stored
+resolved, so nothing goes stale when another file changes.
 
 ## pipe decomposition
 - `Extract`: transform `Flow<FileChunks> -> Flow<FileChunks>` between `Chunk` and `Embed`; it reads the file text that
@@ -58,3 +59,18 @@ Resolution is computed at read time, not stored, so it never goes stale when ano
   src file vanished are deleted with the file.
 - identity: the meta pin becomes `<embed profile id>+graph1`; opening an older index wipes vectors, chunks, files, graph and
   rebuilds instead of mixing.
+
+## output
+`ss <q> [<q2> ..] [-q Q ..] [-n N] [--budget T] [--json] [--lines]`: bare words form one query; if any word has a space each
+word is a query (facet); `-q` adds facets. One call answers all facets; `related:` lists symbols two hits share. `--lines`
+keeps `path:start-end  score` + 3 lines (old `Request::Search`). `ss graph <symbol|path:line> [--depth 1|2] [--json]`.
+Caps: 5 per list then `+N more`; `--budget` keeps hits in rank order (rank 1 of every facet first), always the top hit,
+and prints `(+N hits cut by --budget T)`; a token is ceil(chars/4) of stdout.
+Wire: `Request::Query{queries,path,limit}` -> `Response::Findings`, `Request::Graph{target,path,depth}` -> `Response::Graph`;
+old `Search`/`Hits` unchanged; replies carry `schema` (1). `--json` document:
+`{schema, facets:[{query, records:[Record]}], related:{items:[{name,path,line,relation,mentions}],more}, cut, budget?}`;
+`Record{rank, score, path, start_line, end_line, chunk_key(hex), preview, symbol:{kind,name,qpath,signature,doc,path,
+start_line,end_line,chunk_key}|null, container, members|calls|called_by|tests: Capped}`; `Capped{items,more,hidden}`;
+`Member{kind,name,signature,path,line}`; `EdgeRef{name,path,line,resolved:exact|ambiguous|unresolved,depth}` (caller: call
+site; callee: definition, or the first candidate when ambiguous; tests: the test fn). `ss graph --json`: `{schema,
+neighborhoods:{items:[{symbol, members, callers, callees, importers, tests}],more}}`, depth-2 entries have `depth: 2`.

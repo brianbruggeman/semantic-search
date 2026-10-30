@@ -3,6 +3,7 @@
 
 use tree_sitter::Node;
 
+use super::METHOD;
 use super::NodeKind;
 use super::walker::{Ctx, Def, Item, cap};
 
@@ -147,7 +148,7 @@ fn callee(ctx: &Ctx<'_>, function: Node<'_>) -> Option<(String, String)> {
         )),
         "field_expression" => {
             let receiver = ctx.field(function, "value");
-            let qual = if receiver == "self" { "self" } else { "" };
+            let qual = if receiver == "self" { "self" } else { METHOD };
             Some((ctx.field(function, "field").to_owned(), qual.to_owned()))
         }
         "generic_function" => function
