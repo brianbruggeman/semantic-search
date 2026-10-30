@@ -76,6 +76,6 @@ and `SS_EMBED_MAX_LENGTH` (256) feed `EmbedProfile`. The store pins `bge-small-e
 (`EmbedProfile::store_id`); opening a shard under a different id wipes vectors, chunks and files so vectors from two
 profiles are never mixed. Measured on the 329-chunk frozen corpus `ss/tests/data/corpus` with 44 gold queries
 (`ss/tests/data/queries.tsv`, `ss/examples/embed_eval.rs`): CoreML vectors match CPU to 3.4e-7 max abs and rank identically but the
-cold index was 3.4% faster (gpu) or 7.2% slower (all), so CPU stays the default; 128 tokens halves the index time and
+cold index was 3.3% faster (gpu) or 7.2% slower (all), so CPU stays the default; 128 tokens halves the index time and
 lowers hit@3 (hybrid 0.636 -> 0.523), so 256 stays. Prefixing the embedded text with `path: symbol` raised hybrid hit@3
 0.636 -> 0.750 but lowered hybrid hit@5 0.795 -> 0.773 (11 of 44 queries ranked worse), so it was not kept.
