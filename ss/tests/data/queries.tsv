@@ -1,0 +1,45 @@
+# query<TAB>path<TAB>start-end<TAB>kind (ident = identifier-like, desc = natural language); gold is a chunk of tests/data/corpus
+walk files respecting gitignore	ss/src/walk.rs	38-50	desc
+list_files	ss/src/walk.rs	38-50	ident
+single instance guard so only one daemon process runs	ss-ipc/src/lock.rs	11-24	desc
+InstanceLock acquire try_lock	ss-ipc/src/lock.rs	11-24	ident
+start the daemon detached with no stdio so it outlives the caller	ss-ipc/src/spawn.rs	12-27	desc
+leave the controlling terminal session so closing the terminal does not kill the daemon	ss-ipc/src/spawn.rs	29-35	desc
+stable hash so every version agrees on the named pipe name	ss-ipc/src/endpoint.rs	51-56	desc
+fnv1a	ss-ipc/src/endpoint.rs	51-56	ident
+split text into lowercase tokens at snake case and camel case boundaries	ss/src/embed.rs	291-311	desc
+length_ordered_groups	ss/src/embed.rs	362-367	ident
+embed texts shortest first in small batches to reduce padding	ss/src/embed.rs	369-390	desc
+find a local huggingface snapshot of the model before downloading	ss/src/embed.rs	392-406	desc
+scale an embedding vector to unit length	ss/src/embed.rs	266-273	desc
+load_fastembed	ss/src/embed.rs	319-339	ident
+reciprocal rank fusion of two ranked id lists	ss/src/query.rs	17-30	desc
+rrf_fuse	ss/src/query.rs	17-30	ident
+exact cosine similarity scan over stored vectors under a path prefix	ss/src/store.rs	201-223	desc
+bm25 full text match over chunk text and path	ss/src/store.rs	225-250	desc
+delete all indexed rows when the embedding model identity changes	ss/src/store.rs	66-81	desc
+split a source file into chunks falling back to fixed line windows	ss/src/chunk.rs	58-68	desc
+merge consecutive small syntax units into one chunk up to a line limit	ss/src/chunk.rs	163-186	desc
+attach doc comments and attributes to the item that follows them	ss/src/chunk.rs	138-161	desc
+an oversized syntax node is split into its children	ss/src/chunk.rs	126-136	desc
+skip a file whose mtime size and content hash are unchanged	ss/src/pipeline.rs	116-173	desc
+unseen_texts	ss/src/pipeline.rs	278-306	ident
+only embed chunks whose key is not already stored	ss/src/pipeline.rs	278-306	desc
+how long the client waits for a reply and why index requests are not bounded	ss/src/client.rs	39-108	desc
+reply_limit_ms	ss/src/client.rs	39-108	ident
+respawn the daemon while retrying to connect until the spawn timeout	ss/src/client.rs	39-108	desc
+find the nearest registered root that contains a path	ss/src/registry.rs	25-90	desc
+write the registry to disk with a temp file then rename	ss/src/registry.rs	25-90	desc
+reply busy when the admission queue is full	ss/src/daemon.rs	525-530	desc
+exit the daemon after it has been idle with no watches	ss/src/daemon.rs	590-602	desc
+read newline framed requests from one client connection and answer each	ss/src/daemon.rs	604-644	desc
+root_for_index	ss/src/daemon.rs	152-162	ident
+wait for a quiet period after file events then index the batch	ss/src/watch.rs	154-191	desc
+filter hidden and gitignored paths out of file change events	ss/src/watch.rs	21-49	desc
+wait_for_event Wake::Quiet	ss/src/watch.rs	199-212	ident
+decode json lines into frames as bytes arrive	ss-proto/src/frame.rs	35-56	desc
+print search hits as json or with a short preview	ss/src/bin/ss.rs	111-131	desc
+delete index rows for files that are no longer in the tree	ss/src/index.rs	123-147	desc
+count chunks seen embedded and skipped as telemetry counters	ss/src/telemetry.rs	40-49	desc
+install telemetry with console output and a rotating json log file	ss/src/telemetry.rs	15-38	desc
+map overflow strategy names to proxima fail modes	ss/src/settings.rs	79-86	desc
