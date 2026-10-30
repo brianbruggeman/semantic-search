@@ -4,7 +4,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use proxima::telemetry::debug;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::chunk::{ChunkKey, RawChunk};
 use crate::error::IndexError;
@@ -162,7 +162,9 @@ impl Store {
         vectors: &[(ChunkKey, Vec<f32>)],
         graph: &FileGraph,
     ) -> rusqlite::Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (key, vector) in vectors {
             tx.execute(
                 "INSERT OR IGNORE INTO vectors(key, vec) VALUES (?1, ?2)",
@@ -568,6 +570,53 @@ mod tests {
                 let outcome = open.join().expect("open thread");
                 assert!(outcome.is_ok(), "round {round}: {outcome:?}");
             }
+        }
+    }
+
+    #[test]
+    fn many_writers_replacing_different_files_at_once_all_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = StoreConfig {
+            dir: dir.path().to_path_buf(),
+            model_id: "feature-hash-256".to_owned(),
+        };
+        drop(Store::open(&config).expect("create shard"));
+        let gate = Arc::new(Barrier::new(16));
+        let writers: Vec<_> = (0..16)
+            .map(|worker| {
+                let (gate, config) = (Arc::clone(&gate), config.clone());
+                thread::spawn(move || {
+                    let mut store = Store::open(&config).expect("open");
+                    gate.wait();
+                    (0..20).try_for_each(|round| {
+                        let text = format!("pub fn worker_{worker}_round_{round}() {{}}");
+                        let key = chunk_key(&text);
+                        let chunk = RawChunk {
+                            start_line: 1,
+                            end_line: 1,
+                            text,
+                            key,
+                        };
+                        let row = FileRow {
+                            mtime_ns: 1,
+                            size: 1,
+                            hash: key,
+                        };
+                        store.replace_file(
+                            &format!("src/w{worker}.rs"),
+                            &row,
+                            &[chunk],
+                            &[(key, vec![1.0, 0.0])],
+                            &FileGraph::default(),
+                        )
+                    })
+                })
+            })
+            .collect();
+
+        for writer in writers {
+            let outcome = writer.join().expect("writer thread");
+            assert!(outcome.is_ok(), "{outcome:?}");
         }
     }
 

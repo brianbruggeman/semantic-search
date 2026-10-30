@@ -438,4 +438,22 @@ mod tests {
             edges_before - walk_edges
         );
     }
+
+    // a multi-thread runtime is what lets file pipelines write at the same instant; the proxima test harness runs one thread
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_tree_of_many_tiny_files_indexes_without_a_busy_database() {
+        let corpus = own_src_corpus(&hash_pool(), EmbedderKind::Hash);
+        let tiny = corpus.root().join("tiny");
+        std::fs::create_dir_all(&tiny).expect("create tiny dir");
+        for number in 0..300 {
+            let source = format!("pub fn tiny_{number}() -> u32 {{\n    {number}\n}}\n");
+            std::fs::write(tiny.join(format!("t{number}.rs")), source).expect("write tiny file");
+        }
+
+        let stats = index_tree(&corpus.shard, &corpus.root())
+            .await
+            .expect("index many files");
+
+        assert!(stats.files_indexed >= 300, "{stats:?}");
+    }
 }
