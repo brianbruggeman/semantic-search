@@ -170,6 +170,16 @@ impl Store {
         statement.query_map(params![file, src], edge_row)?.collect()
     }
 
+    /// Every edge of the given kinds in the index, in file and line order.
+    pub fn edges_of_kinds(&self, kinds: &[EdgeKind]) -> rusqlite::Result<Vec<EdgeRow>> {
+        let sql = format!(
+            "SELECT {EDGE_COLUMNS} FROM edges WHERE kind IN ({}) ORDER BY file, line, id",
+            kind_list(kinds)
+        );
+        let mut statement = self.conn.prepare_cached(&sql)?;
+        statement.query_map([], edge_row)?.collect()
+    }
+
     /// Edges of the given kinds whose written destination is `dst`, anywhere in the index.
     pub fn edges_to(&self, dst: &str, kinds: &[EdgeKind]) -> rusqlite::Result<Vec<EdgeRow>> {
         let sql = format!(

@@ -68,7 +68,7 @@ fn resolved_of(resolution: Resolution) -> Resolved {
 }
 
 /// The definitions an edge's written name could mean, given its qualifier.
-fn candidates(store: &Store, edge: &EdgeRow) -> Found<Vec<NodeRow>> {
+pub fn candidates(store: &Store, edge: &EdgeRow) -> Found<Vec<NodeRow>> {
     let call = matches!(edge.edge.kind, EdgeKind::Calls | EdgeKind::Tests);
     Ok(store
         .nodes_named(&edge.edge.dst)?
@@ -169,6 +169,10 @@ fn member_of(root: &Path, row: &NodeRow) -> Member {
 
 /// A type's own members, or the siblings of any other symbol.
 fn members(store: &Store, root: &Path, node: &NodeRow) -> Found<Capped<Member>> {
+    Ok(capped(all_members(store, root, node)?, 0))
+}
+
+fn all_members(store: &Store, root: &Path, node: &NodeRow) -> Found<Vec<Member>> {
     let own = matches!(
         node.node.kind,
         NodeKind::Struct | NodeKind::Enum | NodeKind::Trait | NodeKind::Type
@@ -182,12 +186,26 @@ fn members(store: &Store, root: &Path, node: &NodeRow) -> Found<Capped<Member>> 
             .map_or("", |(parent, _)| parent)
     };
     let rows = store.members_of(&node.file, container)?;
-    let listed = rows
+    Ok(rows
         .iter()
         .filter(|row| row.node.qpath != node.node.qpath)
         .map(|row| member_of(root, row))
-        .collect();
-    Ok(capped(listed, 0))
+        .collect())
+}
+
+/// Callees, callers and members of a symbol with no cap: the follow-up lookups an agent would otherwise search for.
+pub fn follow_ups(
+    store: &Store,
+    root: &Path,
+    node: &NodeRow,
+) -> Found<(Vec<EdgeRef>, Vec<EdgeRef>, Vec<Member>)> {
+    let (outgoing, _) = callees(store, root, node, 1)?;
+    let incoming_calls = incoming(store, root, node, &[EdgeKind::Calls])?;
+    Ok((
+        refs(outgoing),
+        refs(incoming_calls),
+        all_members(store, root, node)?,
+    ))
 }
 
 fn container_label(store: &Store, node: &NodeRow) -> Found<String> {
