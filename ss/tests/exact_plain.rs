@@ -49,6 +49,12 @@ fn run(program: &str, args: &[&str], cwd: &Path) -> Vec<u8> {
 }
 
 fn ss(args: &[&str], cwd: &Path) -> Vec<u8> {
+    let mut all = vec!["--exact", "-n"];
+    all.extend_from_slice(args);
+    run(env!("CARGO_BIN_EXE_ss"), &all, cwd)
+}
+
+fn ss_args(args: &[&str], cwd: &Path) -> Vec<u8> {
     let mut all = vec!["--exact"];
     all.extend_from_slice(args);
     run(env!("CARGO_BIN_EXE_ss"), &all, cwd)
@@ -209,4 +215,47 @@ fn a_file_list_over_the_budget_is_cut_with_a_count() {
 
     assert!(out.contains("cut:"), "{out}");
     assert!(out.chars().count() <= 200, "{} chars", out.chars().count());
+}
+
+#[test]
+fn without_n_the_output_has_no_line_numbers_like_grep() {
+    let dir = tree();
+    let ours = ss_args(&["files", "src/lib.rs"], dir.path());
+    let grep = run("/usr/bin/grep", &["files", "src/lib.rs"], dir.path());
+    assert!(!grep.is_empty(), "grep finds matches");
+    assert_eq!(ours, grep);
+}
+
+#[test]
+fn context_without_n_matches_grep_bytes() {
+    let dir = tree();
+    let ours = ss_args(&["-A", "1", "sort", "src/lib.rs"], dir.path());
+    let grep = run(
+        "/usr/bin/grep",
+        &["-A", "1", "sort", "src/lib.rs"],
+        dir.path(),
+    );
+    assert!(!grep.is_empty(), "grep finds matches");
+    assert_eq!(ours, grep);
+}
+
+#[test]
+fn dash_h_drops_the_path_prefix_instead_of_printing_help() {
+    let dir = tree();
+    let ours = ss_args(&["-rh", "files", "src"], dir.path());
+    let grep = run("/usr/bin/grep", &["-rh", "files", "src"], dir.path());
+    assert!(!grep.is_empty(), "grep finds matches");
+    assert_eq!(sorted_lines(&ours), sorted_lines(&grep));
+}
+
+#[test]
+fn a_two_file_grep_matches_byte_for_byte() {
+    let dir = tree();
+    let ours = ss_args(&["files", "src/lib.rs", "src/walk.rs"], dir.path());
+    let grep = run(
+        "/usr/bin/grep",
+        &["files", "src/lib.rs", "src/walk.rs"],
+        dir.path(),
+    );
+    assert_eq!(ours, grep);
 }
