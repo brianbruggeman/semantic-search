@@ -404,7 +404,7 @@ async fn run_exact(cli: &Cli) -> Result<ExitCode, String> {
     let layout = Layout {
         mode,
         numbered: cli.line_number,
-        prefix: !cli.no_filename && !(paths.len() == 1 && paths[0].is_file()),
+        prefix: !(cli.no_filename || paths.len() == 1 && paths[0].is_file()),
         separators: cli
             .context
             .or(cli.after_context)

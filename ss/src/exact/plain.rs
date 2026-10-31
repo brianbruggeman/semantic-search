@@ -148,10 +148,10 @@ fn rows_of(regex: &Regex, text: &str, context: Context) -> (usize, Vec<Row>) {
     for hit in &hits {
         let start = hit.saturating_sub(context.before).max(next);
         let end = (hit + context.after + 1).min(lines.len());
-        for index in start..end {
+        for (index, text) in lines.iter().enumerate().take(end).skip(start) {
             rows.push(Row {
                 line: index + 1,
-                text: lines[index].to_owned(),
+                text: (*text).to_owned(),
                 matched: hits.binary_search(&index).is_ok(),
             });
         }
