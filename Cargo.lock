@@ -4354,6 +4354,7 @@ dependencies = [
  "flume",
  "futures",
  "ignore",
+ "libc",
  "notify",
  "ort",
  "proxima-lib",
