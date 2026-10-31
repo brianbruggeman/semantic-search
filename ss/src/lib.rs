@@ -8,6 +8,7 @@ pub mod embed;
 pub mod error;
 pub mod exact;
 pub mod graph;
+pub mod history;
 pub mod index;
 pub mod pipeline;
 pub mod query;

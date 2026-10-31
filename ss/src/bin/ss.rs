@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use ss::client::Client;
 use ss::exact::{compile, scan};
+use ss::history::{Source, View, render as render_history};
 use ss::render::{
     COMPACT_BUDGET, Compact, EXACT_BUDGET, compact_text, exact_text, facets, findings_json,
     findings_text, graph_json, graph_text, lines_text,
@@ -62,6 +63,24 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Symbol-level summary of one commit: files by size with the symbols touched, no daemon or index
+    Show {
+        /// Commit to summarize
+        rev: String,
+        #[command(flatten)]
+        args: HistoryArgs,
+    },
+    /// Symbol-level summary of a diff: working tree vs index, `--staged`, `<rev>` vs working tree, or `<rev1> <rev2>`
+    Diff {
+        /// Up to two revisions
+        #[arg(num_args = 0..=2)]
+        revs: Vec<String>,
+        /// Compare the index with HEAD (or with the given revision)
+        #[arg(long)]
+        staged: bool,
+        #[command(flatten)]
+        args: HistoryArgs,
+    },
     /// Index a directory (created as a root on first use) and wait for it to finish
     Index { path: PathBuf },
     /// Show the neighbourhood of a symbol name or path:line: members, callers, callees, importers, tests
@@ -80,14 +99,54 @@ enum Command {
     },
 }
 
+/// Drill-down and budget switches shared by `show` and `diff`.
+#[derive(Debug, Args)]
+struct HistoryArgs {
+    /// Cap the reply at about this many tokens (chars / 4); the summary defaults to 400, drill-downs to 1500
+    #[arg(long)]
+    budget: Option<usize>,
+    /// Print this file's hunks instead of the summary
+    #[arg(long, conflicts_with_all = ["symbol", "full"])]
+    file: Option<String>,
+    /// Print only the hunks inside the symbol with this name or qualified path
+    #[arg(long, conflicts_with = "full")]
+    symbol: Option<String>,
+    /// Print the raw git patch
+    #[arg(long)]
+    full: bool,
+    /// Context lines around hunks in --file and --symbol (default 3)
+    #[arg(long)]
+    context: Option<u32>,
+}
+
+impl HistoryArgs {
+    fn view(&self) -> View {
+        match (&self.file, &self.symbol, self.full) {
+            (Some(path), _, _) => View::File(path.clone()),
+            (_, Some(name), _) => View::Symbol(name.clone()),
+            (_, _, true) => View::Full,
+            _ => View::Summary,
+        }
+    }
+}
+
 #[proxima::main(runtime = "tokio")]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
+    match &cli.command {
+        Some(Command::Show { rev, args }) => return run_history(&Source::Show(rev.clone()), args),
+        Some(Command::Diff { revs, staged, args }) => {
+            let source = Source::Diff { revs: revs.clone(), staged: *staged };
+            return run_history(&source, args);
+        }
+        _ => {}
+    }
     let client = match Settings::load() {
         Ok(settings) => Client::new(settings),
         Err(error) => return fail(&format!("bad SS_* configuration: {error}")),
     };
     let outcome = match cli.command {
+        Some(Command::Show { .. } | Command::Diff { .. }) => unreachable_history(),
         Some(Command::Index { path }) => run_index(&client, &path).await,
         Some(Command::Graph {
             target,
@@ -98,6 +157,24 @@ async fn main() -> ExitCode {
         None => run_search(&client, &cli).await,
     };
     outcome.unwrap_or_else(|message| fail(&message))
+}
+
+fn unreachable_history() -> Result<ExitCode, String> {
+    Err("history subcommands are handled before the daemon client".to_owned())
+}
+
+fn run_history(source: &Source, args: &HistoryArgs) -> ExitCode {
+    let here = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(error) => return fail(&error.to_string()),
+    };
+    match render_history(&here, source, &args.view(), args.budget, args.context) {
+        Ok(text) => {
+            print!("{text}");
+            exit_for(!text.is_empty())
+        }
+        Err(error) => fail(&error.to_string()),
+    }
 }
 
 fn fail(message: &str) -> ExitCode {
