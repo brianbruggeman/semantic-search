@@ -24,13 +24,15 @@ const EXIT_ERROR: u8 = 2;
 /// What `ss -h` prints; `ss --help` keeps clap's full text.
 const BRIEF_HELP: &str = "\
 Usage: ss [OPTIONS] <QUERY>... | ss <COMMAND>
-  ss QUERY...           semantic search; --exact for regex, --budget N
-  ss outline FILE       headings or symbols with line ranges
-  ss section FILE NAME  one heading or symbol body (or --line N)
-  ss graph SYMBOL       callers, callees, members
-  ss show REV | diff    symbol-level commit or diff summary
-  ss index PATH         index a directory
-  ss --help             all options
+  ss QUERY...        semantic search; --exact regex
+  ss outline FILE    symbols with line ranges
+  ss section FILE N  one symbol body (or --line N)
+  ss graph SYMBOL    callers, callees, members
+  ss def|refs SYM    scip definition, references
+  ss scip load FILE  load a scip index
+  ss show REV|diff   symbol-level change summary
+  ss index PATH      index a directory
+  ss --help          all options
 ";
 
 /// Semantic code search backed by the shared `ssd` daemon, which `ss` starts on demand.
