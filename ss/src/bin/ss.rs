@@ -27,7 +27,7 @@ const EXIT_ERROR: u8 = 2;
 const BRIEF_HELP: &str = "\
 Usage: ss [OPTIONS] <QUERY>... | ss <COMMAND>
   ss QUERY...        semantic search; --exact regex
-  ss find QUERY...   one call: path, ident, regex or phrase
+  ss find QUERY  one call
   ss outline FILE    symbols with line ranges
   ss section FILE N  one symbol body (or --line N)
   ss graph SYMBOL    callers, callees, members
