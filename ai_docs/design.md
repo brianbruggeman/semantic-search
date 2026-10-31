@@ -213,3 +213,15 @@ Baseline at 57913b0 is recorded below after the first runs.
 | B5 cold call, wall ms | 819.8 | 1075.0 | 1216.1 | 1000 |
 
 B1 passes; B2, B3, B4 fail in all runs; B5 passes once of three. CPU per query is small (3.9 to 9.0 ms client), so the failures are wall-clock stalls, not compute.
+
+## Immutable segments replace the generation counter: kill criteria (registered before measuring)
+
+The `gen` meta row and everything keyed on it (vector_cache snapshots, single-flight build, `vector_cache_stale_ms`, `IndexRun` stale serving, prebuild on run end) are replaced by content-addressed immutable segments: a live list `Arc<[Arc<Segment>]>` plus a tombstone set, swapped atomically; a query clones the list pointer (identity is the version, no number). A write commits to SQLite, then publishes one new segment and its tombstones in ONE swap. Ship only if all hold (release builds, getrusage CPU time):
+
+- K1: capturing the list pointer on the query path is at most 5 us p99 CPU (1,000 iterations)
+- K2: end-to-end `vector_search` CPU p99 is at most 10 ms on the ~27k-chunk index (20 tagged copies) with 4 concurrent writers appending segments
+- K3: publish cost for one file's write (new segment + tombstones + swap) is at most 2 ms p99
+- K4: compaction of 32 segments at 27k rows runs off the query path and K2 still holds while it runs
+- K5: all 44 gold queries (frozen corpus, `ss/tests/data`) return IDENTICAL ids and order to the SQLite scan, before and after a replace_file of one file and a remove_file
+
+If any fails, report the failing number and commit nothing but this section.
