@@ -57,7 +57,7 @@ resolved, so nothing goes stale when another file changes.
 - `replace_file` deletes and reinserts a file's rows in its transaction; `remove_file` deletes them. Edges store dst names,
   so an edge to a symbol that vanished stays a true statement about the source text and reads as `unresolved`; edges whose
   src file vanished are deleted with the file.
-- identity: the meta pin becomes `<embed profile id>+graph1`; opening an older index wipes vectors, chunks, files, graph and
+- identity: the meta pin becomes `<embed profile id>+graph3`; opening an older index wipes vectors, chunks, files, graph and
   rebuilds instead of mixing.
 
 ## output

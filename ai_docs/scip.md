@@ -10,7 +10,7 @@ occurrence names the exact symbol it refers to.
 - `scip_occurrences(file, start_line, start_col, end_line, end_col, symbol_id, role, enclosing_start, enclosing_end)`
 - `scip_files(file, content_hash)` with blake3 of the file at the time the index was generated.
 
-`GRAPH_VERSION` is part of the pinned store identity; it moved to 2 so older shards rebuild.
+`GRAPH_VERSION` is part of the pinned store identity; it moved to 3 (impl nodes and scip tables) so older shards rebuild.
 
 ## Freshness policy
 

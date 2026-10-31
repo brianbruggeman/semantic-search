@@ -48,8 +48,8 @@ CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
 END;
 ";
 
-/// Bumped whenever the graph tables change shape or meaning; part of the pinned store identity.
-pub const GRAPH_VERSION: u32 = 2;
+/// Bumped whenever the graph tables change shape or meaning (3: impl nodes and scip tables); part of the pinned store identity.
+pub const GRAPH_VERSION: u32 = 3;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(10_000);
 const WAL_ATTEMPTS: u32 = 200;
 const WAL_RETRY_PAUSE: Duration = Duration::from_millis(5);
