@@ -439,8 +439,8 @@ mod tests {
         );
     }
 
-    // a multi-thread runtime is what lets file pipelines write at the same instant; the proxima test harness runs one thread
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    // a multi-thread runtime is what lets file pipelines write at the same instant
+    #[proxima::test(flavor = "multi_thread", worker_threads = 8)]
     async fn a_tree_of_many_tiny_files_indexes_without_a_busy_database() {
         let corpus = own_src_corpus(&hash_pool(), EmbedderKind::Hash);
         let tiny = corpus.root().join("tiny");
