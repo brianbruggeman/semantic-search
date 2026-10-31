@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::Command;
 
 use tempfile::TempDir;
 
@@ -58,9 +59,30 @@ class Counter:
         self.count += 2
 ";
 
+const TEST_NAME: &str = "ss test";
+const TEST_EMAIL: &str = "ss-test@users.noreply.github.com";
+
+// the owner's global config signs through an agent and runs identity hooks; fixtures must not see any of it
+fn hermetic_git(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .current_dir(dir)
+        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+        .args(["-c", "core.hooksPath=/dev/null", "-c", "init.defaultBranch=main"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", dir)
+        .env("GIT_AUTHOR_NAME", TEST_NAME)
+        .env("GIT_COMMITTER_NAME", TEST_NAME)
+        .env("GIT_AUTHOR_EMAIL", TEST_EMAIL)
+        .env("GIT_COMMITTER_EMAIL", TEST_EMAIL);
+    command
+}
+
 fn git(dir: &Path, args: &[&str]) {
-    let owned: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
-    run(dir, &owned).expect("git command in the fixture repo");
+    let output = hermetic_git(dir).args(args).output().expect("spawn git in the fixture repo");
+    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 fn commit(dir: &Path, files: &[(&str, &str)], message: &str) {
@@ -68,7 +90,7 @@ fn commit(dir: &Path, files: &[(&str, &str)], message: &str) {
         std::fs::write(dir.join(name), body).expect("write fixture file");
     }
     git(dir, &["add", "-A"]);
-    git(dir, &["-c", "user.name=t", "-c", "user.email=t@users.noreply.github.com", "commit", "-q", "-m", message]);
+    git(dir, &["commit", "-q", "-m", message]);
 }
 
 fn fixture() -> TempDir {
@@ -151,4 +173,22 @@ fn diff_of_working_tree_names_the_edited_symbol() {
     let text = render(dir.path(), &source, &View::Summary, None, None).expect("render diff");
     assert!(text.contains("calc.rs +1 -1"), "{text}");
     assert!(text.contains("  M fn calc::added (+1 -1)"), "{text}");
+}
+
+#[test]
+fn hermetic_git_commits_despite_a_global_config_demanding_a_broken_signer() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let hostile = dir.path().join("hostile.gitconfig");
+    std::fs::write(&hostile, "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /bin/false\n").expect("write hostile config");
+    git(dir.path(), &["init", "-q"]);
+    std::fs::write(dir.path().join("a.txt"), "a\n").expect("write file");
+    git(dir.path(), &["add", "-A"]);
+
+    let output = hermetic_git(dir.path())
+        .env("GIT_CONFIG_GLOBAL", &hostile)
+        .args(["commit", "-q", "-m", "unsigned"])
+        .output()
+        .expect("spawn git");
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
