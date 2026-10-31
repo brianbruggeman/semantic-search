@@ -1,5 +1,8 @@
+// tests assert with expect messages
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! `ss --exact` against `rg -n --no-heading` on a small real-looking tree: same lines, never more bytes.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -187,9 +190,11 @@ fn twenty_small_cases_never_cost_more_bytes_than_rg() {
 fn a_result_over_the_budget_switches_to_the_grouped_form_with_a_cut_line() {
     let dir = tempfile::tempdir().expect("tempdir");
     for index in 0..6 {
-        let body: String = (0..80)
-            .map(|line| format!("    let value_{line} = compute(needle, {index});\n"))
-            .collect();
+        let mut body = String::new();
+        for line in 0..80 {
+            writeln!(body, "    let value_{line} = compute(needle, {index});")
+                .expect("write to string");
+        }
         write(dir.path(), &format!("src/part{index}.rs"), &body);
     }
 
