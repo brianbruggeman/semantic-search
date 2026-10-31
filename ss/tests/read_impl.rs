@@ -44,14 +44,26 @@ fn section_by_impl_name_is_case_insensitive_and_selects_the_whole_block() {
 }
 
 #[test]
-fn a_bare_type_name_is_ambiguous_between_the_type_and_its_impl_blocks() {
+fn a_bare_type_name_returns_the_definition_and_lists_its_impl_headers() {
     let (_dir, path) = write_source();
 
-    let error = section_header(&path, Target::Name("ChunkConfig")).expect_err("ambiguous");
+    let out = section_file(&path, Target::Name("ChunkConfig"), SECTION_BUDGET, 0).expect("section");
 
-    let ReadError::Ambiguous { count, close, .. } = error else { panic!("{error:?}") };
-    assert_eq!(count, 3);
-    assert_eq!(close, "  1-3 enum pub enum ChunkConfig\n  5-9 impl ChunkConfig\n  13-23 impl Pipe for ChunkConfig");
+    assert!(out.contains(".rs:1-3 enum pub enum ChunkConfig\n1: pub enum ChunkConfig {"), "{out}");
+    let expected = "impls:\n  5-9 impl ChunkConfig\n  13-23 impl Pipe for ChunkConfig\n";
+    assert!(out.ends_with(expected), "{out}");
+}
+
+#[test]
+fn a_name_shared_by_a_function_and_a_struct_stays_ambiguous() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("clash.rs");
+    fs::write(&path, "pub struct Walk;\n\npub fn Walk() {}\n").expect("write source");
+
+    let error = section_header(&path, Target::Name("Walk")).expect_err("ambiguous");
+
+    let ReadError::Ambiguous { count, .. } = error else { panic!("{error:?}") };
+    assert_eq!(count, 2);
 }
 
 #[test]

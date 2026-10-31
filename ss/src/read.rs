@@ -183,12 +183,16 @@ pub fn section(
         return Err(ReadError::NoStructure { path: path.to_owned() });
     }
     let lines: Vec<&str> = text.lines().collect();
-    let entry = pick(path, &entries, &lines, target)?;
+    let (entry, impls) = pick(path, &entries, &lines, target)?;
     let (start, end) = entry.range;
     let first = start.saturating_sub(context).max(1);
     let last = (end + context).min(lines.len());
     let header = format!("{path}:{start}-{end} {}\n", entry.label);
-    Ok(fit_body(path, &header, &lines, first, last, budget))
+    let mut out = fit_body(path, &header, &lines, first, last, budget);
+    if !impls.is_empty() {
+        let _ = writeln!(out, "impls:\n{}", list(&impls));
+    }
+    Ok(out)
 }
 
 fn fit_body(path: &str, header: &str, lines: &[&str], first: usize, last: usize, budget: usize) -> String {
@@ -213,9 +217,13 @@ fn fit_body(path: &str, header: &str, lines: &[&str], first: usize, last: usize,
     out
 }
 
-fn pick<'e>(path: &str, entries: &'e [Entry], lines: &[&str], target: Target<'_>) -> Result<&'e Entry, ReadError> {
+/// The picked entry plus, for a bare type name, the headers of that type's `impl` blocks.
+type Picked<'e> = (&'e Entry, Vec<&'e Entry>);
+
+fn pick<'e>(path: &str, entries: &'e [Entry], lines: &[&str], target: Target<'_>) -> Result<Picked<'e>, ReadError> {
     match target {
         Target::Line(line) => pick_line(entries, lines, line)
+            .map(|entry| (entry, Vec::new()))
             .ok_or_else(|| ReadError::LineOutside { path: path.to_owned(), line }),
         Target::Name(query) => pick_named(path, entries, query),
     }
@@ -275,7 +283,7 @@ fn is_exact(entry: &Entry, query: &str) -> bool {
     name == query || name.rsplit("::").next() == Some(query)
 }
 
-fn pick_named<'e>(path: &str, entries: &'e [Entry], query: &str) -> Result<&'e Entry, ReadError> {
+fn pick_named<'e>(path: &str, entries: &'e [Entry], query: &str) -> Result<Picked<'e>, ReadError> {
     let wanted = query.to_lowercase();
     let exact: Vec<&Entry> = entries.iter().filter(|entry| is_exact(entry, &wanted)).collect();
     let partial: Vec<&Entry> = entries
@@ -284,7 +292,10 @@ fn pick_named<'e>(path: &str, entries: &'e [Entry], query: &str) -> Result<&'e E
         .collect();
     let found = if exact.is_empty() { partial } else { with_impls(exact, partial) };
     match found.as_slice() {
-        [only] => Ok(*only),
+        [only] => Ok((*only, Vec::new())),
+        [first, rest @ ..] if !first.implementation && rest.iter().all(|entry| entry.implementation) => {
+            Ok((*first, rest.to_vec()))
+        }
         [] => Err(ReadError::NotFound {
             path: path.to_owned(),
             query: query.to_owned(),
@@ -299,7 +310,8 @@ fn pick_named<'e>(path: &str, entries: &'e [Entry], query: &str) -> Result<&'e E
     }
 }
 
-/// A bare type name also names the `impl` blocks of that type, so the match is ambiguous and lists them.
+/// A bare type name also names the `impl` blocks of that type; a lone type definition answers with them listed,
+/// anything else (a function and a struct sharing the name) stays ambiguous.
 fn with_impls<'e>(exact: Vec<&'e Entry>, partial: Vec<&'e Entry>) -> Vec<&'e Entry> {
     let extra: Vec<&Entry> = partial
         .into_iter()
