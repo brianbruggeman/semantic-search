@@ -15,9 +15,11 @@ use ss_proto::{
 
 mod compact;
 mod exact;
+mod plain;
 
 pub use compact::{Compact, compact_text};
 pub use exact::exact_text;
+pub use plain::{Layout, Mode, exact_reply, plain_text};
 
 /// Tokens held back for the "cut" footer whenever a budget may drop hits.
 /// Characters held back for a `cut:` footer once a first pass already cut something.

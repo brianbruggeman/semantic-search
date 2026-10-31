@@ -41,7 +41,7 @@ pub fn compile(pattern: &str, fixed: bool, ignore_case: bool) -> Result<Regex, E
         .build()?)
 }
 
-fn clipped(line: &str) -> String {
+pub(crate) fn clipped(line: &str) -> String {
     let line = line.trim();
     if line.chars().count() <= LINE_CHARS {
         return line.to_owned();
@@ -65,7 +65,7 @@ fn scan_text(regex: &Regex, text: &str, keep: usize) -> (usize, Vec<(usize, Stri
     (total, lines)
 }
 
-fn read_text(path: &Path) -> Option<String> {
+pub(crate) fn read_text(path: &Path) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
     if meta.len() > MAX_FILE_BYTES {
         return None;
@@ -89,6 +89,8 @@ pub fn scan(root: &Path, regex: &Regex, keep: usize) -> Vec<FileMatches> {
         })
         .collect()
 }
+
+pub mod plain;
 
 #[cfg(test)]
 mod tests;

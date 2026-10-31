@@ -1,13 +1,15 @@
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use ss::client::Client;
-use ss::exact::{compile, scan};
+use ss::exact::compile;
+use ss::exact::plain::{Context, files_of, globs, pattern_source, scan_rows};
 use ss::history::{Source, View, render as render_history};
 use ss::render::{
-    COMPACT_BUDGET, Compact, EXACT_BUDGET, compact_text, exact_text, facets, findings_json,
-    findings_text, graph_json, graph_text, lines_text,
+    COMPACT_BUDGET, Compact, EXACT_BUDGET, Layout, Mode, compact_text, exact_reply, facets,
+    findings_json, findings_text, graph_json, graph_text, lines_text,
 };
 use ss::settings::Settings;
 use ss_proto::{Hit, Request, Response};
@@ -53,6 +55,45 @@ struct Cli {
     /// Ignore case in an exact search
     #[arg(short = 'i', long)]
     ignore_case: bool,
+    /// Exact search: a pattern (repeatable); with -e every positional word is a path
+    #[arg(short = 'e', long = "regexp")]
+    patterns: Vec<String>,
+    /// Exact search: match whole words only
+    #[arg(short = 'w', long)]
+    word: bool,
+    /// Exact search: print only the paths of files with a match
+    #[arg(short = 'l', long = "files-with-matches")]
+    files_only: bool,
+    /// Exact search: print `path:count` per file
+    #[arg(short = 'c', long)]
+    count: bool,
+    /// Exact search: lines of context after each match
+    #[arg(short = 'A', long)]
+    after_context: Option<usize>,
+    /// Exact search: lines of context before each match
+    #[arg(short = 'B', long)]
+    before_context: Option<usize>,
+    /// Exact search: lines of context around each match
+    #[arg(short = 'C', long)]
+    context: Option<usize>,
+    /// Exact search: only files matching this glob (repeatable)
+    #[arg(long, alias = "glob")]
+    include: Vec<String>,
+    /// Exact search: skip files matching this glob (repeatable)
+    #[arg(long)]
+    exclude: Vec<String>,
+    /// Accepted for grep compatibility and ignored: the search is always recursive
+    #[arg(short = 'r', short_alias = 'R', long)]
+    recursive: bool,
+    /// Accepted for grep compatibility and ignored: extended regex is the default
+    #[arg(short = 'E', long)]
+    extended: bool,
+    /// Exact search: read the pattern as grep basic regex (no `\|` translation)
+    #[arg(short = 'G', long)]
+    basic: bool,
+    /// Accepted for grep compatibility and ignored: the path prefix follows rg's rules
+    #[arg(short = 'H', long)]
+    with_filename: bool,
     /// Matches shown per file in an exact search; more are counted as `+N more`
     #[arg(long, default_value_t = 5)]
     per_file: usize,
@@ -132,7 +173,7 @@ impl HistoryArgs {
 
 #[proxima::main(runtime = "tokio")]
 async fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(grep_argv(std::env::args_os().collect()));
     match &cli.command {
         Some(Command::Show { rev, args }) => return run_history(&Source::Show(rev.clone()), args),
         Some(Command::Diff { revs, staged, args }) => {
@@ -263,21 +304,103 @@ async fn run_search(client: &Client, cli: &Cli) -> Result<ExitCode, String> {
     }
 }
 
+const GREP_SWITCHES: &str = "rRnHiwFlcEGs";
+
+fn is_switch_cluster(arg: &OsStr) -> bool {
+    arg.to_str().is_some_and(|text| {
+        text.len() > 1
+            && text.starts_with('-')
+            && text[1..]
+                .chars()
+                .all(|letter| GREP_SWITCHES.contains(letter))
+    })
+}
+
+/// grep's `-n` is a bare switch; in the semantic form it takes a count. In an exact search drop it from switch clusters.
+fn grep_argv(args: Vec<OsString>) -> Vec<OsString> {
+    let exact = args.iter().any(|arg| {
+        arg == "--exact"
+            || arg == "--fixed-strings"
+            || (is_switch_cluster(arg) && arg.to_string_lossy().contains('F'))
+    });
+    if !exact {
+        return args;
+    }
+    args.into_iter()
+        .filter_map(|arg| {
+            if !is_switch_cluster(&arg) {
+                return Some(arg);
+            }
+            let rest: String = arg
+                .to_string_lossy()
+                .chars()
+                .filter(|letter| *letter != 'n')
+                .collect();
+            (rest != "-").then(|| OsString::from(rest))
+        })
+        .collect()
+}
+
+fn exact_patterns(cli: &Cli) -> (Vec<String>, Vec<PathBuf>) {
+    let mut words = cli.query.iter();
+    let mut patterns = cli.patterns.clone();
+    if patterns.is_empty() {
+        patterns.extend(words.next().cloned());
+    }
+    let mut paths: Vec<PathBuf> = words.map(PathBuf::from).collect();
+    paths.extend(cli.path.clone());
+    (patterns, paths)
+}
+
 async fn run_exact(cli: &Cli) -> Result<ExitCode, String> {
-    let pattern = cli.query.join(" ");
-    if pattern.is_empty() {
+    let (patterns, mut paths) = exact_patterns(cli);
+    if patterns.is_empty() {
         return Err("no pattern given (try `ss --exact 'fn \\w+_files'`)".to_owned());
     }
-    let regex = compile(&pattern, cli.fixed, cli.ignore_case).map_err(|error| error.to_string())?;
     let here = std::env::current_dir().map_err(|error| error.to_string())?;
-    let scope = PathBuf::from(absolute(cli.path.as_deref().unwrap_or(&here))?);
-    let keep = cli.per_file;
-    let files = tokio::task::spawn_blocking(move || scan(&scope, &regex, keep))
-        .await
-        .map_err(|error| error.to_string())?;
+    if paths.is_empty() {
+        paths.push(here.clone());
+    }
+    let paths = paths
+        .iter()
+        .map(|path| absolute(path).map(PathBuf::from))
+        .collect::<Result<Vec<_>, _>>()?;
+    let source = pattern_source(&patterns, cli.fixed, cli.word, !cli.basic);
+    let regex = compile(&source, false, cli.ignore_case).map_err(|error| error.to_string())?;
+    let filter = globs(&here, &cli.include, &cli.exclude).map_err(|error| error.to_string())?;
+    let mode = if cli.files_only {
+        Mode::Files
+    } else if cli.count {
+        Mode::Count
+    } else {
+        Mode::Lines
+    };
+    let layout = Layout {
+        mode,
+        prefix: !(paths.len() == 1 && paths[0].is_file()),
+        separators: cli
+            .context
+            .or(cli.after_context)
+            .or(cli.before_context)
+            .is_some(),
+        per_file: cli.per_file,
+    };
+    let around = Context {
+        before: cli.before_context.or(cli.context).unwrap_or(0),
+        after: cli.after_context.or(cli.context).unwrap_or(0),
+    };
+    let around = if mode == Mode::Lines {
+        around
+    } else {
+        Context::default()
+    };
+    let files =
+        tokio::task::spawn_blocking(move || scan_rows(&files_of(&paths, &filter), &regex, around))
+            .await
+            .map_err(|error| error.to_string())?;
     print!(
         "{}",
-        exact_text(&files, &here, cli.budget.unwrap_or(EXACT_BUDGET))
+        exact_reply(&files, &here, layout, cli.budget.unwrap_or(EXACT_BUDGET))
     );
     Ok(exit_for(!files.is_empty()))
 }
