@@ -342,3 +342,27 @@ fn short_help_still_prints_help_outside_exact_mode() {
         assert!(out.contains("Usage"), "{args:?}: {out}");
     }
 }
+
+#[test]
+fn short_help_is_at_most_120_tokens_and_long_help_is_the_full_text() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let brief = String::from_utf8(run(env!("CARGO_BIN_EXE_ss"), &["-h"], dir.path())).expect("utf8");
+    let full = String::from_utf8(run(env!("CARGO_BIN_EXE_ss"), &["--help"], dir.path())).expect("utf8");
+
+    assert!(!brief.is_empty() && brief.len().div_ceil(4) <= 120, "{} chars", brief.len());
+    for word in ["outline", "section", "graph", "show", "index"] {
+        assert!(brief.contains(word), "{word} missing from {brief}");
+    }
+    assert!(full.contains("--compact") && full.len() > brief.len() * 4, "{full}");
+}
+
+#[test]
+fn h_is_still_no_filename_in_an_exact_search() {
+    let dir = tree();
+
+    let out = String::from_utf8(ss_args(&["-rh", "walk_files", "src"], dir.path())).expect("utf8");
+
+    assert!(out.contains("pub fn walk_files"), "{out}");
+    assert!(!out.contains("src/walk.rs"), "{out}");
+}
