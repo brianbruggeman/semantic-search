@@ -24,7 +24,8 @@ fn cpu() -> Duration {
         usage
     };
     let micros = |value: libc::timeval| {
-        u64::try_from(value.tv_sec).unwrap_or(0) * 1_000_000 + u64::try_from(value.tv_usec).unwrap_or(0)
+        u64::try_from(value.tv_sec).unwrap_or(0) * 1_000_000
+            + u64::try_from(value.tv_usec).unwrap_or(0)
     };
     Duration::from_micros(micros(usage.ru_utime) + micros(usage.ru_stime))
 }
@@ -66,7 +67,11 @@ fn build(dir: &Path, copies: usize) -> Store {
                 .collect();
             let path = format!("copy_{copy}/{}", entry.file_name().to_string_lossy());
             let hash = chunks.first().map_or([0; 32], |chunk| chunk.key);
-            let row = FileRow { mtime_ns: 1, size: 1, hash };
+            let row = FileRow {
+                mtime_ns: 1,
+                size: 1,
+                hash,
+            };
             store
                 .replace_file(&path, &row, &chunks, &vectors, &FileGraph::default())
                 .expect("replace");
@@ -102,12 +107,17 @@ fn score(rows: &[(i64, Vec<u8>)], query: &[f32]) -> Vec<(i64, f32)> {
 }
 
 fn main() {
-    let copies: usize = std::env::args().nth(1).and_then(|text| text.parse().ok()).unwrap_or(20);
+    let copies: usize = std::env::args()
+        .nth(1)
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(20);
     let scratch = std::env::var_os("TMPDIR").map_or_else(std::env::temp_dir, Into::into);
     let dir = scratch.join(format!("ss-scan-split-{}", std::process::id()));
     let store = build(&dir, copies);
     println!("chunks={}", store.chunk_count().expect("count"));
-    let query = hash_embed(&["embed pool worker threads".to_owned()]).expect("embed").remove(0);
+    let query = hash_embed(&["embed pool worker threads".to_owned()])
+        .expect("embed")
+        .remove(0);
     let conn = Connection::open(dir.join("index.db")).expect("conn");
     let (mut total, mut read, mut dots, mut select) = (vec![], vec![], vec![], vec![]);
     for _ in 0..REPEATS {
