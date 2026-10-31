@@ -10,6 +10,7 @@ pub mod exact;
 pub mod graph;
 pub mod history;
 pub mod index;
+pub mod map;
 pub mod pipeline;
 pub mod query;
 pub mod read;

@@ -60,7 +60,7 @@ fn io_error(path: &Path, error: &std::io::Error) -> ReadError {
     ReadError::Io { path: path.display().to_string(), message: error.to_string() }
 }
 
-fn structure(path: &str, text: &str) -> Vec<Entry> {
+pub(crate) fn structure(path: &str, text: &str) -> Vec<Entry> {
     if let Some(kind) = docs::doc_kind(path) {
         return docs::entries(kind, text);
     }

@@ -6,6 +6,7 @@ use clap::{Args, Parser, Subcommand};
 use ss::client::Client;
 use ss::exact::compile;
 use ss::exact::plain::{Context, files_of, globs, pattern_source, scan_rows};
+use ss::map::{MAP_BUDGET, map_dir, map_json, map_text};
 use ss::history::{Source, View, render as render_history};
 use ss::read::{OUTLINE_BUDGET, SECTION_BUDGET, Target, outline_file, section_file};
 use ss::render::{
@@ -31,6 +32,7 @@ Usage: ss [OPTIONS] <QUERY>... | ss <COMMAND>
   ss def|refs SYM    scip definition, references
   ss scip load FILE  load a scip index
   ss show REV|diff   symbol-level change summary
+  ss map [DIR]       dirs, files, purposes
   ss index PATH      index a directory
   ss --help          all options
 ";
@@ -171,6 +173,20 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         context: usize,
     },
+    /// Budgeted map of a directory tree: size and one-line purpose per file plus purpose coverage; no daemon or index
+    Map {
+        /// Directory to map (default: the current directory)
+        dir: Option<PathBuf>,
+        /// Cap the reply at about this many tokens (chars / 4); default 600
+        #[arg(long)]
+        budget: Option<usize>,
+        /// Show only directories nested at most this many levels below DIR (0 = files directly in DIR)
+        #[arg(long)]
+        depth: Option<usize>,
+        /// Print the map as JSON (schema in `ai_docs/map.md`)
+        #[arg(long)]
+        json: bool,
+    },
     /// Compiler-resolved definitions and references from a SCIP index
     Scip {
         #[command(subcommand)]
@@ -276,6 +292,9 @@ async fn main() -> ExitCode {
         Some(Command::Outline { file, budget, depth }) => {
             return print_read(outline_file(file, budget.unwrap_or(OUTLINE_BUDGET), *depth));
         }
+        Some(Command::Map { dir, budget, depth, json }) => {
+            return run_map(dir.as_deref().unwrap_or(Path::new(".")), budget.unwrap_or(MAP_BUDGET), *depth, *json);
+        }
         Some(Command::Section { file, name, line, budget, context }) => {
             let target = line.map_or_else(|| Target::Name(name.as_deref().unwrap_or("")), Target::Line);
             let reply = section_file(file, target, budget.unwrap_or(SECTION_BUDGET), *context);
@@ -301,7 +320,7 @@ async fn main() -> ExitCode {
         Err(error) => return fail(&format!("bad SS_* configuration: {error}")),
     };
     let outcome = match cli.command {
-        Some(Command::Show { .. } | Command::Diff { .. } | Command::Outline { .. } | Command::Section { .. } | Command::Scip { .. } | Command::Def { .. } | Command::Refs { .. }) => {
+        Some(Command::Show { .. } | Command::Diff { .. } | Command::Outline { .. } | Command::Map { .. } | Command::Section { .. } | Command::Scip { .. } | Command::Def { .. } | Command::Refs { .. }) => {
             unreachable_history()
         }
         Some(Command::Index { path }) => run_index(&client, &path).await,
@@ -386,6 +405,19 @@ fn run_history(source: &Source, args: &HistoryArgs) -> ExitCode {
         }
         Err(error) => fail(&error.to_string()),
     }
+}
+
+fn run_map(dir: &Path, budget: usize, depth: Option<usize>, json: bool) -> ExitCode {
+    if !dir.is_dir() {
+        return fail(&format!("{}: not a directory", dir.display()));
+    }
+    let map = map_dir(dir, budget, depth);
+    if json {
+        println!("{}", map_json(&map));
+    } else {
+        print!("{}", map_text(&map));
+    }
+    exit_for(map.total > 0)
 }
 
 fn print_read(reply: Result<String, ss::read::ReadError>) -> ExitCode {
