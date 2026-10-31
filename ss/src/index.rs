@@ -448,14 +448,23 @@ mod tests {
         let locked = corpus.root().join("src/locked.rs");
         std::fs::write(&locked, "pub fn locked() -> u32 {\n    1\n}\n").expect("write");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
-        let readable = std::fs::read(&locked).is_ok();
+        if std::fs::read(&locked).is_ok() {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).expect("restore");
+            eprintln!("skipped: process can read a mode-000 file (likely root), the unreadable path cannot be exercised");
+            return;
+        }
 
         let first = index_tree(&corpus.shard, &corpus.root()).await;
         let second = index_tree(&corpus.shard, &corpus.root()).await;
-
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).expect("restore");
-        assert!(readable || first.expect("first index").files_indexed > 0);
-        assert!(readable || second.expect("second index").files_indexed == 0);
+
+        let first = first.expect("first index must succeed");
+        let second = second.expect("second index must succeed");
+        let left_out = |stats: &IndexStats| stats.files_seen - stats.files_indexed - stats.files_unchanged;
+        assert!(first.files_indexed > 0, "{first:?}");
+        assert_eq!(left_out(&first), 1, "exactly the locked file is skipped: {first:?}");
+        assert_eq!(second.files_indexed, 0, "{second:?}");
+        assert_eq!(left_out(&second), 1, "the locked file stays skipped: {second:?}");
     }
 
     // a multi-thread runtime is what lets file pipelines write at the same instant
