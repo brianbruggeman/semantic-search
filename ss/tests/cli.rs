@@ -7,7 +7,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use support::{Env, percentile, run_bounded, tagged_copies, text};
+use support::{Env, log_copy_name, percentile, run_bounded, tagged_copies, text};
 
 fn index_root(env: &Env) -> std::process::Output {
     env.run("ss", &["index", env.root().to_str().expect("utf8")])
@@ -284,4 +284,23 @@ async fn daemon_exits_after_idle_period_when_no_watches_and_no_clients() {
         "daemon never idled out"
     );
     assert!(!env.run("ssd", &["status"]).status.success());
+}
+
+#[test]
+fn two_async_tests_on_the_same_worker_thread_name_get_distinct_log_dirs() {
+    let first = log_copy_name(Some("ss::cli first_test"), Some("tokio-rt-worker"), 100);
+    let second = log_copy_name(Some("ss::cli second_test"), Some("tokio-rt-worker"), 100);
+    let unnamed = log_copy_name(None, Some("tokio-rt-worker"), 100);
+    let other_process = log_copy_name(None, Some("tokio-rt-worker"), 101);
+    assert_ne!(first, second);
+    assert_ne!(unnamed, other_process);
+    assert_eq!(unnamed, "tokio-rt-worker-100");
+}
+
+#[test]
+fn nextest_exposes_the_test_name_the_log_copy_uses() {
+    if std::env::var_os("NEXTEST").is_some() {
+        let name = std::env::var("NEXTEST_TEST_NAME").expect("nextest sets NEXTEST_TEST_NAME");
+        assert!(name.contains("nextest_exposes"), "name={name}");
+    }
 }

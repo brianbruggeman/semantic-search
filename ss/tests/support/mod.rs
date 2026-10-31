@@ -123,10 +123,9 @@ impl Env {
         let Some(target) = std::env::var_os("SS_TEST_LOG_DIR") else {
             return;
         };
-        let name = std::thread::current()
-            .name()
-            .unwrap_or("test")
-            .replace("::", "_");
+        let nextest = std::env::var("NEXTEST_TEST_NAME").ok();
+        let thread = std::thread::current();
+        let name = log_copy_name(nextest.as_deref(), thread.name(), std::process::id());
         let destination = PathBuf::from(target).join(name);
         let _ = std::fs::create_dir_all(&destination);
         for entry in std::fs::read_dir(self.home.path().join("logs"))
@@ -229,6 +228,16 @@ pub async fn wait_until_listening(client: &Client) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("daemon never started listening");
+}
+
+/// Nextest names the test in `NEXTEST_TEST_NAME`; the thread name is the test name only under plain `cargo test`
+/// (async tests run on `tokio-rt-worker` threads), so any other name is disambiguated by the process id.
+pub fn log_copy_name(nextest: Option<&str>, thread: Option<&str>, pid: u32) -> String {
+    match (nextest, thread) {
+        (Some(name), _) => name.replace("::", "_"),
+        (None, Some(name)) if name.contains("::") => name.replace("::", "_"),
+        (None, other) => format!("{}-{pid}", other.unwrap_or("test")),
+    }
 }
 
 impl Drop for Env {
