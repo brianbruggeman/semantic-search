@@ -29,11 +29,20 @@ results in as plain data (`semantic: &[String]`, `graph: Option<String>`).
 
 Provenance tags per file: `exact`, `term-match`, `semantic`, `resolved-fresh`, `syntactic` (outline only).
 
+## Boundary
+
+A separate component (Clef) decides whether the caller's knowledge is sufficient, that is, whether to acquire evidence
+at all. `ss` never decides whether to search, and the model never chooses between `rg`, `Read` and `ss`: `ss find` is
+the deterministic evidence acquirer. It gives no tool-choice advice beyond the `next:` follow-up commands.
+
 ## Output
 
 Budget 500 tokens (chars / 4, `--budget N`), `--json` gives the same fields. Files are dropped from the tail and
 lines from the tail of each file; the top file always prints; `cut:` gives what was dropped. Purpose is the first
 `//!` line, markdown heading or Python docstring line within the first 30 lines, else `-`.
+The second line is a sufficiency signal a gate can read without more calls: `found: 3 files, 7 matches; definition:
+yes (1)` (IDENT only: `no`, `yes (1)` or `ambiguous (N)`), `found: 0` when nothing; the header brackets say whether
+results are `exact`, `term-match` and/or `semantic`.
 Exit 0 when anything is found, 1 when nothing, 2 on error (bad regex, missing root).
 
 ## Abandoned
