@@ -6,6 +6,7 @@ use clap::{Args, Parser, Subcommand};
 use ss::client::Client;
 use ss::exact::compile;
 use ss::exact::plain::{Context, files_of, globs, pattern_source, scan_rows};
+use ss::find::{FIND_BUDGET, Shape, classify, find, render_json as find_json, render_text as find_text};
 use ss::map::{MAP_BUDGET, map_dir, map_json, map_text};
 use ss::history::{Source, View, render as render_history};
 use ss::read::{OUTLINE_BUDGET, SECTION_BUDGET, Target, outline_file, section_file};
@@ -26,6 +27,7 @@ const EXIT_ERROR: u8 = 2;
 const BRIEF_HELP: &str = "\
 Usage: ss [OPTIONS] <QUERY>... | ss <COMMAND>
   ss QUERY...        semantic search; --exact regex
+  ss find QUERY...   one call: path, ident, regex or phrase
   ss outline FILE    symbols with line ranges
   ss section FILE N  one symbol body (or --line N)
   ss graph SYMBOL    callers, callees, members
@@ -146,6 +148,21 @@ enum Command {
         staged: bool,
         #[command(flatten)]
         args: HistoryArgs,
+    },
+    /// One call that classifies the query (path, identifier, regex, phrase) and returns at most 5 files with a next step
+    Find {
+        /// The query; words are joined by spaces
+        #[arg(required = true)]
+        query: Vec<String>,
+        /// Cap the reply at about this many tokens (chars / 4); default 500
+        #[arg(long)]
+        budget: Option<usize>,
+        /// Print the reply as JSON
+        #[arg(long)]
+        json: bool,
+        /// Directory to search under (default: the current directory)
+        #[arg(long)]
+        path: Option<PathBuf>,
     },
     /// Headings (docs) or symbols (source) of a file with `start-end` line ranges, within a token budget; no daemon
     Outline {
@@ -289,6 +306,7 @@ async fn main() -> ExitCode {
             let source = Source::Diff { revs: revs.clone(), staged: *staged };
             return run_history(&source, args);
         }
+        Some(Command::Find { query, budget, json, path }) => return run_find(query, *budget, *json, path.as_deref()).await,
         Some(Command::Outline { file, budget, depth }) => {
             return print_read(outline_file(file, budget.unwrap_or(OUTLINE_BUDGET), *depth));
         }
@@ -320,7 +338,7 @@ async fn main() -> ExitCode {
         Err(error) => return fail(&format!("bad SS_* configuration: {error}")),
     };
     let outcome = match cli.command {
-        Some(Command::Show { .. } | Command::Diff { .. } | Command::Outline { .. } | Command::Map { .. } | Command::Section { .. } | Command::Scip { .. } | Command::Def { .. } | Command::Refs { .. }) => {
+        Some(Command::Show { .. } | Command::Diff { .. } | Command::Find { .. } | Command::Outline { .. } | Command::Map { .. } | Command::Section { .. } | Command::Scip { .. } | Command::Def { .. } | Command::Refs { .. }) => {
             unreachable_history()
         }
         Some(Command::Index { path }) => run_index(&client, &path).await,
@@ -386,6 +404,46 @@ fn run_scip_load(index: &Path, root: Option<&Path>) -> ExitCode {
             ExitCode::from(EXIT_HITS)
         }
         Err(message) => fail(&message),
+    }
+}
+
+async fn run_find(words: &[String], budget: Option<usize>, json: bool, path: Option<&Path>) -> ExitCode {
+    match find_outcome(&words.join(" "), budget, json, path).await {
+        Ok(code) => code,
+        Err(message) => fail(&message),
+    }
+}
+
+async fn find_outcome(query: &str, budget: Option<usize>, json: bool, path: Option<&Path>) -> Result<ExitCode, String> {
+    let root = PathBuf::from(absolute(path.unwrap_or(Path::new(".")))?);
+    let phrase = classify(&root, query) == Shape::Phrase;
+    let semantic = if phrase { semantic_files(&root, query).await } else { None };
+    let (scan_root, scan_query, hits) = (root.clone(), query.to_owned(), semantic.clone().unwrap_or_default());
+    let mut found = tokio::task::spawn_blocking(move || find(&scan_root, &scan_query, &hits))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    if phrase && semantic.is_none() {
+        found.notes.push("semantic skipped: no daemon running".to_owned());
+    }
+    if let Some(ident) = found.ident.clone() {
+        found.graph = scip_graph_text(&ident, Some(&root));
+        if found.graph.is_none() {
+            found.notes.push("graph skipped: no scip rows".to_owned());
+        }
+    }
+    let text = if json { find_json(&found) } else { find_text(&found, budget.unwrap_or(FIND_BUDGET)) };
+    println!("{}", text.trim_end());
+    Ok(exit_for(!found.is_empty()))
+}
+
+/// The running daemon's hybrid hits as (path, start, end); `None` when no daemon answers (never spawns one).
+async fn semantic_files(root: &Path, query: &str) -> Option<Vec<(String, usize, usize)>> {
+    let client = Client::new(Settings::load().ok()?);
+    let request = Request::Search { query: query.to_owned(), path: root.to_string_lossy().into_owned(), limit: 20 };
+    match client.send_if_running(request).await.ok()?? {
+        Response::Hits { hits } => Some(hits.into_iter().map(|hit| (hit.path, hit.start_line as usize, hit.end_line as usize)).collect()),
+        _ => None,
     }
 }
 

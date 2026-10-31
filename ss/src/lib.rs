@@ -7,6 +7,7 @@ pub mod daemon;
 pub mod embed;
 pub mod error;
 pub mod exact;
+pub mod find;
 pub mod graph;
 pub mod history;
 pub mod index;
