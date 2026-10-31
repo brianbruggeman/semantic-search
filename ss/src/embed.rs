@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use fastembed::{
@@ -131,17 +132,51 @@ struct Job {
     reply: oneshot::Sender<Result<Vec<Vec<f32>>, EmbedError>>,
 }
 
+const WARM_TEXT: &str = "warm up";
+
+/// Warm-up bookkeeping shared by a pool's workers: how many have loaded their model and run one embed.
+struct Warmth {
+    enabled: bool,
+    query_total: usize,
+    query_ready: AtomicUsize,
+    index_ready: AtomicUsize,
+}
+
+/// What a warming worker reports to: the shared counters and the channel a waiter drains.
+struct WarmReport {
+    warmth: Arc<Warmth>,
+    done: flume::Sender<Result<(), EmbedError>>,
+}
+
+impl WarmReport {
+    fn finish(&self, lane: Lane, outcome: Result<(), EmbedError>) {
+        if outcome.is_ok() {
+            let counter = match lane {
+                Lane::Query => &self.warmth.query_ready,
+                Lane::Index => &self.warmth.index_ready,
+            };
+            counter.fetch_add(1, Ordering::Release);
+        }
+        let _ = self.done.send(outcome);
+    }
+}
+
 /// Embedding worker threads, each owning its own model. `Pipe<In = EmbedRequest, Out = Vec<Vec<f32>>>`: the
 /// embedder seam is a pipe, not a trait.
 ///
-/// The two lanes never share a worker: one thread serves [`Lane::Query`] at normal priority, `workers` low-priority
-/// threads serve [`Lane::Index`]. A search embeds its text in milliseconds, an index batch holds a worker for
-/// seconds; with shared workers every search queued behind whichever batch was running (measured 2.1-2.4 s
-/// instead of 16 ms, `examples/query_load.rs`).
+/// The two lanes never share a worker: `query_workers` threads serve [`Lane::Query`] at normal priority,
+/// `index_workers` low-priority threads serve [`Lane::Index`]. A search embeds its text in milliseconds, an index
+/// batch holds a worker for seconds; with shared workers every search queued behind whichever batch was running
+/// (measured 2.1-2.4 s instead of 16 ms, `examples/query_load.rs`).
+///
+/// Models load lazily on a worker's first job unless the pool is built with [`EmbedPool::with_lanes_warm`], which
+/// loads every worker's model on its own thread at once and runs one short embed through it.
 #[derive(Clone)]
 pub struct EmbedPool {
     query: flume::Sender<Job>,
     index: flume::Sender<Job>,
+    warmth: Arc<Warmth>,
+    query_warmed: flume::Receiver<Result<(), EmbedError>>,
 }
 
 impl EmbedPool {
@@ -165,16 +200,104 @@ impl EmbedPool {
         Factory: Fn() -> Result<Model, EmbedError> + Send + Sync + 'static,
         Model: FnMut(&[String]) -> EmbedOutput + 'static,
     {
+        Self::with_warm_start(query_workers, index_workers, false, factory)
+    }
+
+    /// Like [`EmbedPool::with_lanes`] but every worker calls `factory` and embeds one short text immediately, in
+    /// parallel on its own thread. [`EmbedPool::warm_query`] resolves once the query workers are done.
+    pub fn with_lanes_warm<Factory, Model>(
+        query_workers: usize,
+        index_workers: usize,
+        factory: Factory,
+    ) -> Self
+    where
+        Factory: Fn() -> Result<Model, EmbedError> + Send + Sync + 'static,
+        Model: FnMut(&[String]) -> EmbedOutput + 'static,
+    {
+        Self::with_warm_start(query_workers, index_workers, true, factory)
+    }
+
+    /// [`EmbedPool::with_lanes`] when `warm` is false, [`EmbedPool::with_lanes_warm`] when true; for callers that
+    /// pick from a setting.
+    pub fn with_warm_start<Factory, Model>(
+        query_workers: usize,
+        index_workers: usize,
+        warm: bool,
+        factory: Factory,
+    ) -> Self
+    where
+        Factory: Fn() -> Result<Model, EmbedError> + Send + Sync + 'static,
+        Model: FnMut(&[String]) -> EmbedOutput + 'static,
+    {
         let (query, query_rx) = flume::unbounded::<Job>();
         let (index, index_rx) = flume::unbounded::<Job>();
+        let (query_done, query_warmed) = flume::unbounded();
+        let (index_done, _index_warmed) = flume::unbounded();
+        let warmth = Arc::new(Warmth {
+            enabled: warm,
+            query_total: query_workers.max(1),
+            query_ready: AtomicUsize::new(0),
+            index_ready: AtomicUsize::new(0),
+        });
         let factory = Arc::new(factory);
-        for number in 0..query_workers.max(1) {
-            start_worker(Lane::Query, number, query_rx.clone(), &factory);
+        let report = |done: &flume::Sender<_>| {
+            warm.then(|| WarmReport {
+                warmth: Arc::clone(&warmth),
+                done: done.clone(),
+            })
+        };
+        for number in 0..warmth.query_total {
+            start_worker(
+                Lane::Query,
+                number,
+                query_rx.clone(),
+                &factory,
+                report(&query_done),
+            );
         }
         for number in 0..index_workers.max(1) {
-            start_worker(Lane::Index, number, index_rx.clone(), &factory);
+            start_worker(
+                Lane::Index,
+                number,
+                index_rx.clone(),
+                &factory,
+                report(&index_done),
+            );
         }
-        Self { query, index }
+        Self {
+            query,
+            index,
+            warmth,
+            query_warmed,
+        }
+    }
+
+    /// True once every query worker has loaded its model and run its warm-up embed; always false for a lazy pool.
+    #[must_use]
+    pub fn is_warm(&self) -> bool {
+        self.warmth.enabled
+            && self.warmth.query_ready.load(Ordering::Acquire) >= self.warmth.query_total
+    }
+
+    /// Index workers that finished warming; they may trail [`EmbedPool::is_warm`].
+    #[must_use]
+    pub fn index_warmed(&self) -> usize {
+        self.warmth.index_ready.load(Ordering::Acquire)
+    }
+
+    /// Resolves when every query worker has reported: `Ok` once all are warm, the first load error otherwise, and
+    /// `PoolClosed` if a worker thread died before reporting. A lazy pool resolves at once.
+    pub async fn warm_query(&self) -> Result<(), EmbedError> {
+        if !self.warmth.enabled {
+            return Ok(());
+        }
+        for _ in 0..self.warmth.query_total {
+            self.query_warmed
+                .recv_async()
+                .await
+                .map_err(|_| EmbedError::PoolClosed)??;
+        }
+        Ok(())
     }
 }
 
@@ -183,6 +306,7 @@ fn start_worker<Factory, Model>(
     number: usize,
     jobs: flume::Receiver<Job>,
     factory: &Arc<Factory>,
+    report: Option<WarmReport>,
 ) where
     Factory: Fn() -> Result<Model, EmbedError> + Send + Sync + 'static,
     Model: FnMut(&[String]) -> EmbedOutput + 'static,
@@ -191,11 +315,15 @@ fn start_worker<Factory, Model>(
     let name = format!("ss-embed-{lane:?}-{number}").to_lowercase();
     let _ = thread::Builder::new()
         .name(name)
-        .spawn(move || run_worker(lane, &jobs, factory.as_ref()));
+        .spawn(move || run_worker(lane, &jobs, factory.as_ref(), report.as_ref()));
 }
 
-fn run_worker<Factory, Model>(lane: Lane, jobs: &flume::Receiver<Job>, factory: &Factory)
-where
+fn run_worker<Factory, Model>(
+    lane: Lane,
+    jobs: &flume::Receiver<Job>,
+    factory: &Factory,
+    report: Option<&WarmReport>,
+) where
     Factory: Fn() -> Result<Model, EmbedError>,
     Model: FnMut(&[String]) -> EmbedOutput,
 {
@@ -203,11 +331,23 @@ where
         let _ = set_current_thread_priority(ThreadPriority::Min);
     }
     let mut model: Option<Model> = None;
+    if let Some(report) = report {
+        report.finish(lane, warm_up(&mut model, factory));
+    }
     while let Ok(job) = jobs.recv() {
         let outcome =
             ensure_model(&mut model, factory).and_then(|ready| embed_checked(ready, &job.texts));
         let _ = job.reply.send(outcome);
     }
+}
+
+fn warm_up<Factory, Model>(slot: &mut Option<Model>, factory: &Factory) -> Result<(), EmbedError>
+where
+    Factory: Fn() -> Result<Model, EmbedError>,
+    Model: FnMut(&[String]) -> EmbedOutput,
+{
+    let ready = ensure_model(slot, factory)?;
+    embed_checked(ready, &[WARM_TEXT.to_owned()]).map(|_| ())
 }
 
 fn ensure_model<'a, Factory, Model>(

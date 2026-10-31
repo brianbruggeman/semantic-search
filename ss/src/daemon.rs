@@ -232,6 +232,7 @@ impl Core {
                     waited_on_build: counters.waited_on_build,
                 }
             },
+            warm: self.pool.is_warm(),
         }
     }
 }
@@ -645,24 +646,34 @@ fn render(outcome: Result<Response, DropReason>) -> Response {
 /// The embed pool a settings value asks for.
 #[must_use]
 pub fn build_pool(settings: &Settings) -> EmbedPool {
+    let (query, index) = (settings.embed_query_workers, settings.embed_workers);
+    let warm = settings.warm_start;
     match settings.embedder_kind() {
-        EmbedderKind::Hash => {
-            EmbedPool::with_lanes(settings.embed_query_workers, settings.embed_workers, || {
-                Ok(hash_embed)
-            })
-        }
+        EmbedderKind::Hash => EmbedPool::with_warm_start(query, index, warm, || Ok(hash_embed)),
         EmbedderKind::FastEmbed => {
             let (cache, threads, profile) = (
                 settings.model_cache_dir(),
                 settings.embed_threads,
                 settings.embed_profile(),
             );
-            EmbedPool::with_lanes(
-                settings.embed_query_workers,
-                settings.embed_workers,
-                move || load_fastembed(&cache, threads, profile),
-            )
+            EmbedPool::with_warm_start(query, index, warm, move || {
+                load_fastembed(&cache, threads, profile)
+            })
         }
+    }
+}
+
+/// Waits for the query workers to warm, bounded by half the client's spawn wait. A load failure or timeout
+/// degrades (status `warm=false`, models load on first use) rather than hanging or killing the daemon.
+async fn await_warm(pool: &EmbedPool, settings: &Settings) {
+    let limit = Duration::from_millis(settings.spawn_timeout_ms / 2);
+    match tokio::time::timeout(limit, pool.warm_query()).await {
+        Ok(Ok(())) => info!("embed query workers warm"),
+        Ok(Err(error)) => warn!("warm-up failed; serving degraded", error = %error),
+        Err(_) => warn!(
+            "warm-up timed out; serving degraded",
+            limit_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)
+        ),
     }
 }
 
@@ -672,9 +683,10 @@ pub async fn run(settings: Settings, pool: Option<EmbedPool>) -> Result<RunOutco
     let Some(_instance) = InstanceLock::acquire(&settings.lock_path())? else {
         return Ok(RunOutcome::AlreadyRunning);
     };
+    let pool = pool.unwrap_or_else(|| build_pool(&settings));
+    await_warm(&pool, &settings).await;
     let listener = listen(&settings.endpoint())?;
     let registry = Registry::load(&settings.state_path())?;
-    let pool = pool.unwrap_or_else(|| build_pool(&settings));
     let core = Arc::new(Core::new(settings, pool, registry));
     let router = Arc::new(Router::new(&core));
     core.resume_watches().await;

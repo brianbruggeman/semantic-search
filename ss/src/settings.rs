@@ -23,6 +23,9 @@ pub struct Settings {
     /// Embedding worker threads reserved for search queries, each owning a model; indexing never uses them
     #[setting(default = 1)]
     pub embed_query_workers: usize,
+    /// Load every embed worker's model and run one embed at daemon start, so no query pays the load; the daemon accepts connections once the query workers are warm
+    #[setting(default = true)]
+    pub warm_start: bool,
     /// Where the fastembed model runs: `cpu` or `coreml` (macos GPU); changing it re-embeds every index
     #[setting(default_str = "cpu")]
     pub embed_provider: String,

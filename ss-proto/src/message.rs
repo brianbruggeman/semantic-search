@@ -85,6 +85,9 @@ pub struct DaemonStatus {
     /// Vector-cache counters; absent from older daemons.
     #[serde(default)]
     pub vector_cache: VectorCacheStatus,
+    /// Every query worker has loaded its model and run a warm-up embed
+    #[serde(default)]
+    pub warm: bool,
 }
 
 /// Totals since the daemon started, except `rebuilds_in_flight` and `max_in_flight` which are a gauge and its high-water mark.

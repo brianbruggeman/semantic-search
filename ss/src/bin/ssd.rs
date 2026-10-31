@@ -97,8 +97,8 @@ async fn status(client: &Client) -> Result<ExitCode, String> {
 
 fn print_status(status: &DaemonStatus) {
     println!(
-        "ssd: running pid={} uptime={}s",
-        status.pid, status.uptime_secs
+        "ssd: running pid={} uptime={}s warm={}",
+        status.pid, status.uptime_secs, status.warm
     );
     println!("roots: {}", status.roots.len());
     status.roots.iter().for_each(|root| println!("  {root}"));
