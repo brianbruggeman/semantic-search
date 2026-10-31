@@ -439,6 +439,25 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[proxima::test(runtime = "tokio")]
+    async fn a_file_the_daemon_cannot_read_is_skipped_not_fatal() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let corpus = own_src_corpus(&hash_pool(), EmbedderKind::Hash);
+        let locked = corpus.root().join("src/locked.rs");
+        std::fs::write(&locked, "pub fn locked() -> u32 {\n    1\n}\n").expect("write");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let readable = std::fs::read(&locked).is_ok();
+
+        let first = index_tree(&corpus.shard, &corpus.root()).await;
+        let second = index_tree(&corpus.shard, &corpus.root()).await;
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).expect("restore");
+        assert!(readable || first.expect("first index").files_indexed > 0);
+        assert!(readable || second.expect("second index").files_indexed == 0);
+    }
+
     // a multi-thread runtime is what lets file pipelines write at the same instant
     #[proxima::test(flavor = "multi_thread", worker_threads = 8)]
     async fn a_tree_of_many_tiny_files_indexes_without_a_busy_database() {

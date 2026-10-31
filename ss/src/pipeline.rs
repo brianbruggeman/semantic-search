@@ -150,7 +150,11 @@ fn read_file(
     if known.is_some_and(|row| row.mtime_ns == mtime_ns && row.size == size) {
         return Ok(Flow::Done(report(&rel, unchanged())));
     }
-    let bytes = std::fs::read(path)?;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => return Ok(Flow::Done(skipped(&rel))),
+        Err(error) => return Err(error.into()),
+    };
     let hash = *blake3::hash(&bytes).as_bytes();
     if known.is_some_and(|row| row.hash == hash) {
         store.touch_file(&rel, mtime_ns)?;
@@ -174,6 +178,11 @@ fn read_file(
             hash,
         },
     }))
+}
+
+/// A file the daemon may not read is counted as seen and left out; failing here would abort the whole run.
+fn skipped(rel: &str) -> FileReport {
+    report(rel, IndexStats { files_seen: 1, ..IndexStats::default() })
 }
 
 /// A file that vanished between the walk and the read is a normal race, not a failure: drop its rows.
