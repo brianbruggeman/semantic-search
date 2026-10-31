@@ -186,3 +186,17 @@ An append-only arena plus per-version visibility set replaces the rebuild-per-ge
 4. visibility set memory is at most 1 bit per row per live version held
 
 If any fails, ship only single-flight rebuild plus the stale bound. No process is spawned on the query path.
+
+## Latency budgets (registered before the first run)
+
+Owner requirement: responses in tens to a few hundred ms. Harness: `ss/examples/latency_budget.rs`, `cargo run --release --example latency_budget -- <embedder> <copies>` (hash default, about 19,000 chunks). The machine is shared (load average 50 to 150), so every row reports wall time and CPU time (getrusage user+sys of the waited-for child processes) separately and labeled; where wall is load noise the gate is CPU time. Exit 0 only if every budget holds; exit 1 lists each failed budget with its number.
+
+| id | scenario | gate |
+|---|---|---|
+| B1 | idle warm query, 200 sequential `ss` client calls | wall p50 <= 100 ms, wall p99 <= 500 ms, CPU p99 <= 20 ms (CPU is the client process only: the daemon exposes no per-query CPU counter in `ssd status`, so server CPU is not measured) |
+| B2 | first query after daemon readiness (stop, start, wait ready, query once) | wall <= 300 ms |
+| B3 | first query after a write (touch one file, wait for the index run, query once) | wall <= 300 ms |
+| B4 | 32 concurrent clients while 200+ new files index | wall p50 <= 150 ms, wall p99 <= 500 ms, every client returns > 0 hits |
+| B5 | cold client call, no daemon (spawn + ready + first query) | hash: wall <= 1,000 ms; fastembed: recorded, not gated (model load included) |
+
+Baseline at 57913b0 is recorded below after the first runs.
