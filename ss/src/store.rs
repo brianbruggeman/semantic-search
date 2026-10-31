@@ -515,7 +515,10 @@ fn read_segment(conn: &Connection) -> rusqlite::Result<Option<Segment>> {
     )?;
     let rows = usize::try_from(rows).unwrap_or(0);
     let bytes = usize::try_from(bytes).unwrap_or(0);
-    if rows == 0 || bytes > vector_cache::limit_bytes() {
+    if rows == 0 {
+        return Ok(Some(Segment::new(0)));
+    }
+    if bytes > vector_cache::limit_bytes() {
         return Ok(None);
     }
     let mut statement = read.prepare(

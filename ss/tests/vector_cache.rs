@@ -300,3 +300,18 @@ async fn a_write_is_searchable_immediately_without_taking_the_sqlite_scan_path()
         "no scan_sqlite fallback"
     );
 }
+
+#[proxima::test(runtime = "tokio")]
+async fn a_list_loaded_from_an_empty_shard_still_serves_later_writes_without_scanning() {
+    let work = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(&config(work.path())).expect("open");
+    store.load_segments().expect("load empty shard");
+    let probe = embed("zebra quasar nebula");
+    let scans_before = vector_cache::counters().scans;
+
+    index_text(&mut store, "first.rs", BODY);
+    let found = store.vector_search(&probe, "first.rs", 5).expect("search");
+
+    assert!(!found.is_empty(), "first write visible");
+    assert_eq!(vector_cache::counters().scans, scans_before, "no scan_sqlite fallback");
+}
