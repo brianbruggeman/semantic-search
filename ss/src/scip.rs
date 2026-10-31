@@ -11,6 +11,7 @@ use scip::types::{Document, Index, SymbolInformation, SymbolRole};
 use thiserror::Error;
 
 use crate::chunk::ChunkKey;
+use crate::graph::NodeKind;
 use crate::store::{DefRow, Store};
 
 #[derive(Debug, Error)]
@@ -268,6 +269,17 @@ pub fn render_calls(
     defs: &[DefRow],
     budget: usize,
 ) -> rusqlite::Result<String> {
+    render_calls_with(store, root, defs, budget, false)
+}
+
+/// `render_calls`, plus `sig:`, `doc:` and `members:` lines under each symbol line when `annotate` is set.
+fn render_calls_with(
+    store: &Store,
+    root: &Path,
+    defs: &[DefRow],
+    budget: usize,
+    annotate: bool,
+) -> rusqlite::Result<String> {
     let mut text = String::new();
     let mut cut = 0;
     for def in defs {
@@ -283,6 +295,11 @@ pub fn render_calls(
             ),
             budget,
         );
+        if annotate {
+            for row in annotation(store, def)? {
+                fits(&mut text, &row, budget);
+            }
+        }
         for (line, callee) in store.scip_callees(def)? {
             let row = format!(
                 "  callee {} {}:{} (at :{})\n",
@@ -315,6 +332,32 @@ pub fn render_calls(
     Ok(text)
 }
 
+/// `  sig:`, `  doc:` and `  members:` lines for a definition: the signature SCIP recorded (else the syntactic
+/// node's), the first doc line and, for a type, its member names, both from the syntactic graph node.
+fn annotation(store: &Store, def: &DefRow) -> rusqlite::Result<Vec<String>> {
+    let node = store.node_at(&def.file, def.line + 1)?;
+    let recorded = store.scip_signature(def.symbol_id)?;
+    let signature = match (&node, recorded.is_empty()) {
+        (Some(row), true) => row.node.signature.clone(),
+        _ => recorded,
+    };
+    let mut rows = Vec::new();
+    if !signature.is_empty() {
+        rows.push(format!("  sig: {signature}\n"));
+    }
+    let Some(row) = node else { return Ok(rows) };
+    if let Some(doc) = row.node.doc.lines().next().filter(|doc| !doc.is_empty()) {
+        rows.push(format!("  doc: {doc}\n"));
+    }
+    let own = matches!(row.node.kind, NodeKind::Struct | NodeKind::Enum | NodeKind::Trait | NodeKind::Type);
+    let members = if own { store.members_of(&row.file, &row.node.qpath)? } else { Vec::new() };
+    if !members.is_empty() {
+        let names: Vec<&str> = members.iter().map(|member| member.node.name.as_str()).collect();
+        rows.push(format!("  members: {}\n", names.join(", ")));
+    }
+    Ok(rows)
+}
+
 /// The SCIP view of `ss graph <target>`: `None` when the root has no SCIP rows or the target has no SCIP
 /// definition, so the caller falls back to the name-resolved daemon reply (those edges are `syntactic`).
 pub fn scip_graph(store: &Store, root: &Path, target: &str) -> Option<String> {
@@ -322,7 +365,7 @@ pub fn scip_graph(store: &Store, root: &Path, target: &str) -> Option<String> {
     let defs = find_defs(store, target)
         .ok()
         .filter(|defs| files > 0 && !defs.is_empty())?;
-    render_calls(store, root, &defs, GRAPH_BUDGET).ok()
+    render_calls_with(store, root, &defs, GRAPH_BUDGET, true).ok()
 }
 
 #[cfg(test)]
@@ -441,6 +484,19 @@ mod tests {
             text.contains("caller caller lib.rs:2 resolved-fresh"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn graph_shows_the_recorded_signature_under_the_symbol_line_and_calls_does_not() {
+        let (dir, mut store) = loaded_fixture();
+        let mut rows = convert(&fixture_index());
+        rows.symbols[0].signature_doc = "fn callee()".into();
+        let hashes = HashMap::from([("lib.rs".to_string(), *blake3::hash(FIXTURE.as_bytes()).as_bytes())]);
+        store.load_scip(&rows, &hashes).expect("reload with a signature");
+        let graph = scip_graph(&store, dir.path(), "callee").expect("scip rows exist for the target");
+        let calls = render_calls(&store, dir.path(), &find_defs(&store, "callee").expect("defs"), 400).expect("calls");
+        assert!(graph.contains("lib.rs:1 resolved-fresh\n  sig: fn callee()\n"), "{graph}");
+        assert!(!calls.contains("sig:"), "{calls}");
     }
 
     #[test]

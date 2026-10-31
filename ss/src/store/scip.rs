@@ -125,6 +125,12 @@ impl Store {
             .transpose()
     }
 
+    /// The first signature line SCIP recorded for the symbol, empty when it recorded none.
+    pub fn scip_signature(&self, symbol_id: i64) -> rusqlite::Result<String> {
+        let mut statement = self.conn.prepare_cached("SELECT signature_doc FROM scip_symbols WHERE id=?1")?;
+        statement.query_row([symbol_id], |row| row.get(0))
+    }
+
     /// Every non-definition occurrence of a symbol, file then line order.
     pub fn scip_refs(&self, symbol_id: i64) -> rusqlite::Result<Vec<RefRow>> {
         let mut statement = self.conn.prepare_cached(
