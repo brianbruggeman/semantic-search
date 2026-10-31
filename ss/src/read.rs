@@ -230,7 +230,30 @@ fn pick_line<'e>(entries: &'e [Entry], lines: &[&str], line: usize) -> Option<&'
         .iter()
         .filter(|entry| entry.range.0 <= line && line <= entry.range.1)
         .min_by_key(|entry| entry.range.1 - entry.range.0)?;
+    if inside.implementation && !is_small(inside, lines) {
+        return Some(nearest_member(entries, inside, line));
+    }
     Some(inside)
+}
+
+fn is_small(entry: &Entry, lines: &[&str]) -> bool {
+    let chars: usize = lines
+        .get(entry.range.0.saturating_sub(1)..entry.range.1.min(lines.len()))
+        .map_or(0, |block| block.iter().map(|text| text.len() + 1).sum());
+    chars / 4 <= SECTION_BUDGET
+}
+
+/// The member of a large `impl` closest to `line`, the impl itself when it has none.
+fn nearest_member<'e>(entries: &'e [Entry], block: &'e Entry, line: usize) -> &'e Entry {
+    entries
+        .iter()
+        .filter(|entry| !std::ptr::eq(*entry, block) && block.range.0 <= entry.range.0 && entry.range.1 <= block.range.1)
+        .min_by_key(|entry| distance(entry.range, line))
+        .unwrap_or(block)
+}
+
+fn distance(range: (usize, usize), line: usize) -> usize {
+    if line < range.0 { range.0 - line } else { line - range.1 }
 }
 
 /// A symbol's range starts at its signature, so a line in the doc comment or attributes above it is outside
@@ -259,7 +282,7 @@ fn pick_named<'e>(path: &str, entries: &'e [Entry], query: &str) -> Result<&'e E
         .iter()
         .filter(|entry| entry.name.to_lowercase().contains(&wanted))
         .collect();
-    let found = if exact.is_empty() { partial } else { exact };
+    let found = if exact.is_empty() { partial } else { with_impls(exact, partial) };
     match found.as_slice() {
         [only] => Ok(*only),
         [] => Err(ReadError::NotFound {
@@ -274,6 +297,15 @@ fn pick_named<'e>(path: &str, entries: &'e [Entry], query: &str) -> Result<&'e E
             close: list(many),
         }),
     }
+}
+
+/// A bare type name also names the `impl` blocks of that type, so the match is ambiguous and lists them.
+fn with_impls<'e>(exact: Vec<&'e Entry>, partial: Vec<&'e Entry>) -> Vec<&'e Entry> {
+    let extra: Vec<&Entry> = partial
+        .into_iter()
+        .filter(|entry| entry.implementation && !exact.iter().any(|found| std::ptr::eq(*found, *entry)))
+        .collect();
+    exact.into_iter().chain(extra).collect()
 }
 
 fn close_to<'e>(entries: &'e [Entry], wanted: &str) -> Vec<&'e Entry> {
