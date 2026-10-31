@@ -200,3 +200,16 @@ Owner requirement: responses in tens to a few hundred ms. Harness: `ss/examples/
 | B5 | cold client call, no daemon (spawn + ready + first query) | hash: wall <= 1,000 ms; fastembed: recorded, not gated (model load included) |
 
 Baseline at 57913b0 is recorded below after the first runs.
+
+### Baseline at 57913b0 (hash embedder, 20 copies = 26,940 chunks, 3 release runs, load average 124 to 141)
+
+| budget | run 1 | run 2 | run 3 | limit |
+|---|---|---|---|---|
+| B1 p50 / p99 wall ms | 25.5 / 105.8 | 32.4 / 101.1 | 23.4 / 79.7 | 100 / 500 |
+| B1 p99 client cpu ms | 8.2 | 9.0 | 8.8 | 20 |
+| B2 first query after ready, wall ms | 1367.8 | 1098.0 | 866.4 | 300 |
+| B3 first query after write, wall ms | 1231.6 | 782.4 | 686.9 | 300 |
+| B4 p50 / p99 wall ms | 13653 / 15413 | 16465 / 16967 | 13170 / 13791 | 150 / 500 |
+| B5 cold call, wall ms | 819.8 | 1075.0 | 1216.1 | 1000 |
+
+B1 passes; B2, B3, B4 fail in all runs; B5 passes once of three. CPU per query is small (3.9 to 9.0 ms client), so the failures are wall-clock stalls, not compute.
