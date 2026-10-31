@@ -351,7 +351,7 @@ fn short_help_is_at_most_120_tokens_and_long_help_is_the_full_text() {
     let full = String::from_utf8(run(env!("CARGO_BIN_EXE_ss"), &["--help"], dir.path())).expect("utf8");
 
     assert!(!brief.is_empty() && brief.len().div_ceil(4) <= 120, "{} chars", brief.len());
-    for word in ["outline", "section", "graph", "def", "refs", "scip load", "show", "index"] {
+    for word in ["outline", "section", "graph", "def", "refs", "scip load", "show", "map", "index"] {
         assert!(brief.contains(word), "{word} missing from {brief}");
     }
     assert!(full.contains("--compact") && full.len() > brief.len() * 4, "{full}");
