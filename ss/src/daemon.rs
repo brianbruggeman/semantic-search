@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::store::{Store, vector_cache};
 use proxima::pipe::{Admission, DropReason, FailMode, Pipe, SinkFront};
-use proxima::telemetry::{info, warn};
+use proxima::telemetry::{debug, info, warn};
 use ss_ipc::{InstanceLock, ListenerExt as _, Stream, listen};
 use ss_proto::{
     DaemonStatus, ErrorKind, Findings, Frame, GraphReply, Hit, IndexStats, LineDecoder, Request,
@@ -746,15 +746,30 @@ async fn drain(core: &Core) {
 
 async fn idle_monitor(core: Arc<Core>) {
     let idle = Duration::from_secs(core.settings.idle_secs);
+    let idle_limit_ms = u64::try_from(idle.as_millis()).unwrap_or(u64::MAX);
     let tick = (idle / 4).clamp(Duration::from_millis(100), Duration::from_secs(5));
     loop {
         tokio::time::sleep(tick).await;
-        let quiet = core.clients.load(Ordering::Relaxed) == 0
-            && core.registry.lock().await.watches.is_empty();
-        if quiet && core.idle_for() >= idle {
+        let clients = core.clients.load(Ordering::Relaxed);
+        let watches = core.registry.lock().await.watches.len();
+        let idle_ms = u64::try_from(core.idle_for().as_millis()).unwrap_or(u64::MAX);
+        let quiet = clients == 0 && watches == 0;
+        if quiet && idle_ms >= idle_limit_ms {
+            info!(
+                "idle limit reached; shutting down",
+                clients = clients,
+                watches = watches,
+                idle_ms = idle_ms
+            );
             core.shutdown.notify_one();
             return;
         }
+        debug!(
+            "idle check kept the daemon up",
+            clients = clients,
+            watches = watches,
+            idle_ms = idle_ms
+        );
     }
 }
 
