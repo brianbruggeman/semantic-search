@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::store::{Store, vector_cache};
@@ -81,6 +81,7 @@ pub struct Core {
     shutdown: Notify,
     clients: AtomicUsize,
     last_activity_ms: AtomicU64,
+    segments_ready: AtomicBool,
 }
 
 impl Core {
@@ -98,6 +99,7 @@ impl Core {
             shutdown: Notify::new(),
             clients: AtomicUsize::new(0),
             last_activity_ms: AtomicU64::new(0),
+            segments_ready: AtomicBool::new(false),
         }
     }
 
@@ -233,9 +235,11 @@ impl Core {
                     segments: counters.segments,
                     tombstones: counters.tombstones,
                     compactions: counters.compactions,
+                    scans: counters.scans,
                 }
             },
             warm: self.pool.is_warm(),
+            segments_ready: self.segments_ready.load(Ordering::Relaxed),
         }
     }
 }
@@ -325,6 +329,29 @@ impl Core {
             .iter()
             .map(|path| path.display().to_string())
             .collect()
+    }
+
+    /// Loads the segment list of every already-indexed shard before ready, bounded by half the client's spawn
+    /// wait. A timeout leaves `segments_ready` false and searches on the SQLite scan until the load lands.
+    async fn load_segments(&self) {
+        let roots = self.registry.lock().await.roots.clone();
+        let configs: Vec<_> = roots
+            .iter()
+            .map(|root| self.settings.store_config(root))
+            .collect();
+        let limit = Duration::from_millis(self.settings.spawn_timeout_ms / 2);
+        let load = tokio::task::spawn_blocking(move || {
+            for config in &configs {
+                if let Ok(store) = Store::open_reader(config) {
+                    let _ = store.load_segments();
+                }
+            }
+        });
+        if let Ok(Ok(())) = tokio::time::timeout(limit, load).await {
+            self.segments_ready.store(true, Ordering::Relaxed);
+        } else {
+            warn!("segment load did not finish before ready; serving degraded");
+        }
     }
 
     /// Daemon start: every registered watch gets its watcher back, and its startup rescan is the first batch.
@@ -688,9 +715,11 @@ pub async fn run(settings: Settings, pool: Option<EmbedPool>) -> Result<RunOutco
     };
     let pool = pool.unwrap_or_else(|| build_pool(&settings));
     await_warm(&pool, &settings).await;
-    let listener = listen(&settings.endpoint())?;
+    let endpoint = settings.endpoint();
     let registry = Registry::load(&settings.state_path())?;
     let core = Arc::new(Core::new(settings, pool, registry));
+    core.load_segments().await;
+    let listener = listen(&endpoint)?;
     let router = Arc::new(Router::new(&core));
     core.resume_watches().await;
     tokio::spawn(idle_monitor(Arc::clone(&core)));

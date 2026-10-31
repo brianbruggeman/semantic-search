@@ -365,3 +365,28 @@ async fn a_model_load_slower_than_the_warm_bound_serves_degraded_instead_of_hang
     );
     assert!(!status.warm, "{status:?}");
 }
+
+#[proxima::test(runtime = "tokio")]
+async fn the_first_query_after_a_restart_is_ready_with_segments_loaded_and_never_scans_sqlite() {
+    let env = Env::new();
+    let pool = EmbedPool::with_lanes_warm(1, 1, || Ok(hash_embed));
+    let (client, daemon) = start(&env, env.settings(), pool).await;
+    stop(&client, daemon).await;
+
+    let restarted = EmbedPool::with_lanes_warm(1, 1, || Ok(hash_embed));
+    let daemon = tokio::spawn(run(env.settings(), Some(restarted)));
+    let client = Client::new(env.settings());
+    wait_until_listening(&client).await;
+    let scans_before = status_of(&client).await.vector_cache.scans;
+    let answer = client.send(search(&env.root(), 5)).await;
+    let status = status_of(&client).await;
+    stop(&client, daemon).await;
+
+    assert!(status.segments_ready, "{status:?}");
+    assert!(status.vector_cache.segments > 0, "{status:?}");
+    assert!(
+        matches!(answer, Ok(Response::Hits { ref hits, .. }) if !hits.is_empty()),
+        "{answer:?}"
+    );
+    assert_eq!(status.vector_cache.scans, scans_before, "{status:?}");
+}

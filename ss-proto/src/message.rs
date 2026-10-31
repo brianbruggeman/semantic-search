@@ -88,6 +88,9 @@ pub struct DaemonStatus {
     /// Every query worker has loaded its model and run a warm-up embed
     #[serde(default)]
     pub warm: bool,
+    /// Every already-indexed shard's segment list was loaded before ready; false means ready degraded (scan fallback).
+    #[serde(default)]
+    pub segments_ready: bool,
 }
 
 /// `hits` and `compactions` are totals since the daemon started; `segments` and `tombstones` are live gauges.
@@ -100,4 +103,7 @@ pub struct VectorCacheStatus {
     pub tombstones: u64,
     #[serde(default)]
     pub compactions: u64,
+    /// Searches that fell back to the SQLite scan.
+    #[serde(default)]
+    pub scans: u64,
 }

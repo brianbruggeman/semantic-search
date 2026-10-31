@@ -282,3 +282,21 @@ async fn publishing_past_the_memory_cap_drops_the_list_and_falls_back_to_sqlite(
         store.scan_sqlite(&probe, "", 20).expect("scan")
     );
 }
+
+#[proxima::test(runtime = "tokio")]
+async fn a_write_is_searchable_immediately_without_taking_the_sqlite_scan_path() {
+    let work = tempfile::tempdir().expect("tempdir");
+    let mut store = loaded_store(work.path());
+    let probe = embed("zebra quasar nebula");
+    let scans_before = vector_cache::counters().scans;
+
+    index_text(&mut store, "fresh.rs", BODY);
+    let found = store.vector_search(&probe, "fresh.rs", 5).expect("search");
+
+    assert!(!found.is_empty(), "new content visible with no wait");
+    assert_eq!(
+        vector_cache::counters().scans,
+        scans_before,
+        "no scan_sqlite fallback"
+    );
+}

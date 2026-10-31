@@ -4,7 +4,9 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use proxima::telemetry::debug;
-use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 
 use crate::chunk::{ChunkKey, RawChunk};
 use crate::error::IndexError;
@@ -97,14 +99,26 @@ impl Store {
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
-        let conn = Connection::open_with_flags(config.dir.join("index.db"), flags)
-            .map_err(|error| if is_code(&error, ErrorCode::CannotOpen) { missing() } else { error.into() })?;
+        let conn =
+            Connection::open_with_flags(config.dir.join("index.db"), flags).map_err(|error| {
+                if is_code(&error, ErrorCode::CannotOpen) {
+                    missing()
+                } else {
+                    error.into()
+                }
+            })?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         let pinned = pinned_identity(&config.model_id);
         let current: Option<String> = conn
             .query_row("SELECT v FROM meta WHERE k='model'", [], |row| row.get(0))
             .optional()
-            .or_else(|error| if is_no_table(&error) { Ok(None) } else { Err(error) })?;
+            .or_else(|error| {
+                if is_no_table(&error) {
+                    Ok(None)
+                } else {
+                    Err(error)
+                }
+            })?;
         match current {
             None => Err(missing()),
             Some(found) if found != pinned => Err(IndexError::IdentityMismatch {
@@ -340,10 +354,11 @@ impl Store {
         prefix: &str,
         limit: usize,
     ) -> rusqlite::Result<Vec<i64>> {
-        match vector_cache::current(&self.dir) {
-            Some(list) => Ok(list.top(query, prefix, limit)),
-            None => self.scan_sqlite(query, prefix, limit),
+        if let Some(list) = vector_cache::current(&self.dir) {
+            return Ok(list.top(query, prefix, limit));
         }
+        vector_cache::count_scan();
+        self.scan_sqlite(query, prefix, limit)
     }
 
     /// The uncached scan: reads every blob out of SQLite per call.

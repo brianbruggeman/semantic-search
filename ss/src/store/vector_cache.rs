@@ -18,6 +18,7 @@ static MAX_SEGMENTS: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_SEGMENTS);
 static HITS: AtomicU64 = AtomicU64::new(0);
 static COMPACTIONS: AtomicU64 = AtomicU64::new(0);
 static OVER_CAP: AtomicU64 = AtomicU64::new(0);
+static SCANS: AtomicU64 = AtomicU64::new(0);
 
 /// Cache activity; `segments` and `tombstones` are the live totals across shards.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -27,6 +28,8 @@ pub struct Counters {
     pub tombstones: u64,
     pub compactions: u64,
     pub over_cap: u64,
+    /// Searches that fell back to the SQLite scan because no list was loaded.
+    pub scans: u64,
 }
 
 #[must_use]
@@ -45,6 +48,7 @@ pub fn counters() -> Counters {
         tombstones,
         compactions: COMPACTIONS.load(Ordering::Relaxed),
         over_cap: OVER_CAP.load(Ordering::Relaxed),
+        scans: SCANS.load(Ordering::Relaxed),
     }
 }
 
@@ -233,6 +237,10 @@ pub fn current(dir: &Path) -> Option<Arc<List>> {
         HITS.fetch_add(1, Ordering::Relaxed);
     }
     found
+}
+
+pub(super) fn count_scan() {
+    SCANS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Drops the list for `dir`; searches scan SQLite until it is loaded again.
