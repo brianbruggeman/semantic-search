@@ -858,4 +858,25 @@ mod single_flight_tests {
         let started = vector_cache::counters().started - started_before;
         assert!(started <= 4, "rebuilds_started was {started}");
     }
+
+    #[test]
+    fn a_query_right_after_an_index_run_finds_a_prebuilt_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = open(dir.path());
+        write_file(&mut store, 0);
+        store.vector_search(&[1.0, 0.0], "", 10).expect("publish");
+        let run = IndexRun::begin();
+        (1..=20).for_each(|number| write_file(&mut store, number));
+        drop(run);
+        while vector_cache::cached_generation(dir.path()) != Some(store.generation().expect("gen")) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let before = vector_cache::counters();
+
+        let hits = store.vector_search(&[1.0, 0.0], "", 50).expect("search");
+
+        let after = vector_cache::counters();
+        assert_eq!(hits.len(), 21);
+        assert_eq!((after.started, after.waited_on_build), (before.started, before.waited_on_build));
+    }
 }

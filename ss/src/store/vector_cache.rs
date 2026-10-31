@@ -188,7 +188,12 @@ impl IndexRun {
 
 impl Drop for IndexRun {
     fn drop(&mut self) {
-        ACTIVE_RUNS.fetch_sub(1, Ordering::Relaxed);
+        if ACTIVE_RUNS.fetch_sub(1, Ordering::Relaxed) == 1 {
+            let dirs: Vec<PathBuf> = SHARDS.lock().keys().cloned().collect();
+            for dir in &dirs {
+                drop(super::ensure_build(dir));
+            }
+        }
     }
 }
 
