@@ -124,6 +124,7 @@ fn sections(kind: DocKind, lines: &[&str], headings: &[Heading]) -> Vec<Entry> {
             label: format!("{mark} {}", heading.title),
             name: heading.title.clone(),
             gist: gist(lines, heading.last + 1, next),
+            implementation: false,
         });
         open.push(heading.level);
     }

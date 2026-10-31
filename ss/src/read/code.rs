@@ -30,12 +30,20 @@ pub(super) fn entries(language: Language, path: &str, text: &str) -> Vec<Entry> 
             Entry {
                 depth,
                 range: (node.start_line as usize, node.end_line as usize),
-                label: format!("{} {owner}{signature}", node.kind.as_str()),
+                label: label(node.kind, &owner, &signature),
                 name: node.qpath.split("::").skip(1).collect::<Vec<_>>().join("::"),
                 gist: first_line(&node.doc),
+                implementation: node.kind == NodeKind::Impl,
             }
         })
         .collect()
+}
+
+fn label(kind: NodeKind, owner: &str, signature: &str) -> String {
+    if kind == NodeKind::Impl {
+        return signature.to_owned();
+    }
+    format!("{} {owner}{signature}", kind.as_str())
 }
 
 fn first_line(doc: &str) -> String {

@@ -45,6 +45,8 @@ pub struct Entry {
     pub label: String,
     pub name: String,
     pub gist: String,
+    /// A Rust `impl` block: a container whose members are the methods and associated items inside its range.
+    pub implementation: bool,
 }
 
 /// What a section is picked by.
@@ -213,14 +215,22 @@ fn fit_body(path: &str, header: &str, lines: &[&str], first: usize, last: usize,
 
 fn pick<'e>(path: &str, entries: &'e [Entry], lines: &[&str], target: Target<'_>) -> Result<&'e Entry, ReadError> {
     match target {
-        Target::Line(line) => entries
-            .iter()
-            .filter(|entry| entry.range.0 <= line && line <= entry.range.1)
-            .min_by_key(|entry| entry.range.1 - entry.range.0)
-            .or_else(|| leads_into(entries, lines, line))
+        Target::Line(line) => pick_line(entries, lines, line)
             .ok_or_else(|| ReadError::LineOutside { path: path.to_owned(), line }),
         Target::Name(query) => pick_named(path, entries, query),
     }
+}
+
+/// A doc comment or attribute above a symbol leads into it, even when a container's range spans the line.
+fn pick_line<'e>(entries: &'e [Entry], lines: &[&str], line: usize) -> Option<&'e Entry> {
+    if let Some(lead) = leads_into(entries, lines, line) {
+        return Some(lead);
+    }
+    let inside = entries
+        .iter()
+        .filter(|entry| entry.range.0 <= line && line <= entry.range.1)
+        .min_by_key(|entry| entry.range.1 - entry.range.0)?;
+    Some(inside)
 }
 
 /// A symbol's range starts at its signature, so a line in the doc comment or attributes above it is outside
