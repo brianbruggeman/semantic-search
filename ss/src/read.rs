@@ -180,8 +180,8 @@ pub fn section(
     if entries.is_empty() {
         return Err(ReadError::NoStructure { path: path.to_owned() });
     }
-    let entry = pick(path, &entries, target)?;
     let lines: Vec<&str> = text.lines().collect();
+    let entry = pick(path, &entries, &lines, target)?;
     let (start, end) = entry.range;
     let first = start.saturating_sub(context).max(1);
     let last = (end + context).min(lines.len());
@@ -211,15 +211,30 @@ fn fit_body(path: &str, header: &str, lines: &[&str], first: usize, last: usize,
     out
 }
 
-fn pick<'e>(path: &str, entries: &'e [Entry], target: Target<'_>) -> Result<&'e Entry, ReadError> {
+fn pick<'e>(path: &str, entries: &'e [Entry], lines: &[&str], target: Target<'_>) -> Result<&'e Entry, ReadError> {
     match target {
         Target::Line(line) => entries
             .iter()
             .filter(|entry| entry.range.0 <= line && line <= entry.range.1)
             .min_by_key(|entry| entry.range.1 - entry.range.0)
+            .or_else(|| leads_into(entries, lines, line))
             .ok_or_else(|| ReadError::LineOutside { path: path.to_owned(), line }),
         Target::Name(query) => pick_named(path, entries, query),
     }
+}
+
+/// A symbol's range starts at its signature, so a line in the doc comment or attributes above it is outside
+/// every range; that line belongs to the next entry when only comment, attribute or blank lines lie between.
+fn leads_into<'e>(entries: &'e [Entry], lines: &[&str], line: usize) -> Option<&'e Entry> {
+    let next = entries.iter().filter(|entry| entry.range.0 > line).min_by_key(|entry| entry.range.0)?;
+    let gap = lines.get(line.checked_sub(1)?..next.range.0.checked_sub(1)?)?;
+    let marked = gap.first().is_some_and(|text| !text.trim().is_empty());
+    (marked && gap.iter().all(|text| is_lead_line(text))).then_some(next)
+}
+
+fn is_lead_line(text: &str) -> bool {
+    let text = text.trim_start();
+    text.is_empty() || ["//", "#", "@", "/*", "*"].iter().any(|mark| text.starts_with(mark))
 }
 
 fn is_exact(entry: &Entry, query: &str) -> bool {
