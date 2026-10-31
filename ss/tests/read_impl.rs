@@ -1,7 +1,10 @@
+// tests assert with expect messages
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! `ss outline` and `ss section` on Rust `impl` blocks, through the library entry points on real files in a tempdir.
 
+use std::fmt::Write as _;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ss::read::{OUTLINE_BUDGET, ReadError, SECTION_BUDGET, Target, outline_file, section_file};
 
@@ -25,7 +28,7 @@ fn outline_lists_impl_blocks_with_ranges_and_nests_their_methods() {
     assert!(!out.contains("cut:"), "{out}");
 }
 
-fn section_header(path: &PathBuf, target: Target<'_>) -> Result<String, ReadError> {
+fn section_header(path: &Path, target: Target<'_>) -> Result<String, ReadError> {
     let out = section_file(path, target, SECTION_BUDGET, 0)?;
     let header = out.lines().next().expect("a header line");
     Ok(header.rsplit_once(".rs:").expect("path then range").1.to_owned())
@@ -103,7 +106,7 @@ fn a_gap_line_in_an_impl_over_the_token_budget_selects_the_nearest_member() {
     let path = dir.path().join("big.rs");
     let mut source = String::from("struct Big;\n\nimpl Big {\n    fn first(&self) -> u8 {\n        1\n    }\n\n    fn second(&self) -> u8 {\n");
     for index in 0..400 {
-        source.push_str(&format!("        let value_{index} = self.compute_something_long_enough_to_count({index});\n"));
+        writeln!(source, "        let value_{index} = self.compute_something_long_enough_to_count({index});").expect("write to string");
     }
     source.push_str("        2\n    }\n}\n");
     fs::write(&path, source).expect("write");
