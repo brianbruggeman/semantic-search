@@ -264,3 +264,74 @@ fn a_two_file_grep_matches_byte_for_byte() {
     );
     assert_eq!(ours, grep);
 }
+
+fn numbered_file(dir: &Path, name: &str, lines: usize, every: usize) {
+    let mut body = String::new();
+    for line in 0..lines {
+        let tag = if line % every == 0 {
+            "needle"
+        } else {
+            "filler"
+        };
+        writeln!(body, "    let value_{line} = compute({tag}, {line});").expect("write to string");
+    }
+    write(dir, name, &body);
+}
+
+#[test]
+fn a_result_under_the_flood_boundary_prints_whole_even_past_three_hundred_tokens() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    numbered_file(dir.path(), "src/big.rs", 120, 1);
+
+    let ours = ss(&["needle"], dir.path());
+
+    assert_eq!(ours, rg(&["needle"], dir.path()));
+    assert!(
+        ours.len() > 1200,
+        "{} bytes is past the old 300 token budget",
+        ours.len()
+    );
+}
+
+#[test]
+fn a_result_over_two_hundred_lines_switches_to_the_grouped_form() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    numbered_file(dir.path(), "src/big.rs", 260, 1);
+
+    let out = String::from_utf8(ss(&["needle"], dir.path())).expect("utf8");
+
+    assert!(out.starts_with("260 matches in 1 files"), "{out}");
+    assert!(out.contains("+255 more"), "{out}");
+    assert!(out.chars().count() <= 3200, "{} chars", out.chars().count());
+}
+
+#[test]
+fn a_big_context_request_keeps_whole_blocks_and_counts_the_cut_ones() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    numbered_file(dir.path(), "src/big.rs", 400, 100);
+
+    let out = String::from_utf8(ss(&["--budget", "2000", "-A", "70", "needle"], dir.path()))
+        .expect("utf8");
+
+    let context = out
+        .lines()
+        .filter(|line| line.starts_with("src/big.rs-"))
+        .count();
+    assert!(
+        context >= 70,
+        "the block keeps its 70 context lines, got {context}\n{out}"
+    );
+    assert!(out.contains("cut: "), "{out}");
+    assert!(out.contains("matches in"), "{out}");
+    assert!(out.chars().count() <= 8000, "{} chars", out.chars().count());
+}
+
+#[test]
+fn short_help_still_prints_help_outside_exact_mode() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for args in [vec!["-h"], vec!["graph", "-h"], vec!["index", "-h"]] {
+        let out =
+            String::from_utf8(run(env!("CARGO_BIN_EXE_ss"), &args, dir.path())).expect("utf8");
+        assert!(out.contains("Usage"), "{args:?}: {out}");
+    }
+}
