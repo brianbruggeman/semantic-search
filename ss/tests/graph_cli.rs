@@ -159,7 +159,7 @@ async fn compact_prints_each_file_once_stays_in_budget_and_names_what_it_cut() {
 }
 
 #[proxima::test(runtime = "tokio")]
-async fn exact_runs_a_regex_scan_grouped_by_file_and_exits_one_without_a_match() {
+async fn exact_prints_one_path_text_line_per_match_and_exits_one_without_a_match() {
     let env = indexed_env();
 
     let found = env.run(
@@ -183,12 +183,12 @@ async fn exact_runs_a_regex_scan_grouped_by_file_and_exits_one_without_a_match()
 
     let found_text = text(&found);
     assert_eq!(found.status.code(), Some(0), "{found_text}");
+    assert!(!found_text.contains("matches in"), "{found_text}");
     assert!(
-        found_text.starts_with("1 matches in 1 files\n"),
+        found_text.contains("query.rs:pub fn rrf_fuse("),
         "{found_text}"
     );
-    assert!(found_text.contains("query.rs (1)\n  "), "{found_text}");
-    assert!(found_text.contains("pub fn rrf_fuse("), "{found_text}");
+    assert_eq!(found_text.lines().count(), 1, "{found_text}");
     assert_eq!(none.status.code(), Some(1));
 }
 
