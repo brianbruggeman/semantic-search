@@ -161,7 +161,14 @@ fn callee(ctx: &Ctx<'_>, function: Node<'_>) -> Option<(String, String)> {
 pub fn doc(ctx: &Ctx<'_>, node: Node<'_>) -> String {
     let mut first = String::new();
     let mut previous = node.prev_sibling();
+    let mut below = node.start_position().row;
     while let Some(sibling) = previous {
+        let end = sibling.end_position();
+        let last_row = if end.column == 0 { end.row.saturating_sub(1) } else { end.row };
+        if last_row + 1 < below {
+            break;
+        }
+        below = sibling.start_position().row;
         match sibling.kind() {
             "line_comment" => {
                 let text = ctx.text(sibling);

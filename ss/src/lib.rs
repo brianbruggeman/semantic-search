@@ -12,6 +12,7 @@ pub mod history;
 pub mod index;
 pub mod pipeline;
 pub mod query;
+pub mod read;
 pub mod registry;
 pub mod render;
 pub mod settings;

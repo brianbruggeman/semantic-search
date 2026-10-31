@@ -7,6 +7,7 @@ use ss::client::Client;
 use ss::exact::compile;
 use ss::exact::plain::{Context, files_of, globs, pattern_source, scan_rows};
 use ss::history::{Source, View, render as render_history};
+use ss::read::{OUTLINE_BUDGET, SECTION_BUDGET, Target, outline_file, section_file};
 use ss::render::{
     COMPACT_BUDGET, Compact, Layout, Mode, compact_text, exact_reply, facets, findings_json,
     findings_text, graph_json, graph_text, lines_text,
@@ -17,6 +18,18 @@ use ss_proto::{Hit, Request, Response};
 const EXIT_HITS: u8 = 0;
 const EXIT_NONE: u8 = 1;
 const EXIT_ERROR: u8 = 2;
+
+/// What `ss -h` prints; `ss --help` keeps clap's full text.
+const BRIEF_HELP: &str = "\
+Usage: ss [OPTIONS] <QUERY>... | ss <COMMAND>
+  ss QUERY...           semantic search; --exact for regex, --budget N
+  ss outline FILE       headings or symbols with line ranges
+  ss section FILE NAME  one heading or symbol body (or --line N)
+  ss graph SYMBOL       callers, callees, members
+  ss show REV | diff    symbol-level commit or diff summary
+  ss index PATH         index a directory
+  ss --help             all options
+";
 
 /// Semantic code search backed by the shared `ssd` daemon, which `ss` starts on demand.
 // clap switches are independent flags, not a state machine
@@ -128,6 +141,32 @@ enum Command {
         #[command(flatten)]
         args: HistoryArgs,
     },
+    /// Headings (docs) or symbols (source) of a file with `start-end` line ranges, within a token budget; no daemon
+    Outline {
+        file: PathBuf,
+        /// Cap the reply at about this many tokens (chars / 4); default 400
+        #[arg(long)]
+        budget: Option<usize>,
+        /// Show only entries nested fewer than this many levels deep (1 = top level)
+        #[arg(long)]
+        depth: Option<usize>,
+    },
+    /// One heading's section or one symbol's body of a file, with line numbers, within a token budget; no daemon
+    Section {
+        file: PathBuf,
+        /// Heading or symbol name: case-insensitive, exact match first, then substring
+        #[arg(required_unless_present = "line")]
+        name: Option<String>,
+        /// Pick the innermost section or symbol containing this line instead of a name
+        #[arg(long, conflicts_with = "name")]
+        line: Option<usize>,
+        /// Cap the reply at about this many tokens (chars / 4); default 1200
+        #[arg(long)]
+        budget: Option<usize>,
+        /// Extra lines printed before and after the range
+        #[arg(long, default_value_t = 0)]
+        context: usize,
+    },
     /// Index a directory (created as a root on first use) and wait for it to finish
     Index { path: PathBuf },
     /// Show the neighbourhood of a symbol name or path:line: members, callers, callees, importers, tests
@@ -179,12 +218,25 @@ impl HistoryArgs {
 
 #[proxima::main(runtime = "tokio")]
 async fn main() -> ExitCode {
-    let cli = Cli::parse_from(grep_argv(std::env::args_os().collect()));
+    let args: Vec<OsString> = std::env::args_os().collect();
+    if args.len() == 2 && args[1] == "-h" {
+        print!("{BRIEF_HELP}");
+        return ExitCode::from(EXIT_HITS);
+    }
+    let cli = Cli::parse_from(grep_argv(args));
     match &cli.command {
         Some(Command::Show { rev, args }) => return run_history(&Source::Show(rev.clone()), args),
         Some(Command::Diff { revs, staged, args }) => {
             let source = Source::Diff { revs: revs.clone(), staged: *staged };
             return run_history(&source, args);
+        }
+        Some(Command::Outline { file, budget, depth }) => {
+            return print_read(outline_file(file, budget.unwrap_or(OUTLINE_BUDGET), *depth));
+        }
+        Some(Command::Section { file, name, line, budget, context }) => {
+            let target = line.map_or_else(|| Target::Name(name.as_deref().unwrap_or("")), Target::Line);
+            let reply = section_file(file, target, budget.unwrap_or(SECTION_BUDGET), *context);
+            return print_read(reply);
         }
         _ => {}
     }
@@ -193,7 +245,9 @@ async fn main() -> ExitCode {
         Err(error) => return fail(&format!("bad SS_* configuration: {error}")),
     };
     let outcome = match cli.command {
-        Some(Command::Show { .. } | Command::Diff { .. }) => unreachable_history(),
+        Some(Command::Show { .. } | Command::Diff { .. } | Command::Outline { .. } | Command::Section { .. }) => {
+            unreachable_history()
+        }
         Some(Command::Index { path }) => run_index(&client, &path).await,
         Some(Command::Graph {
             target,
@@ -207,7 +261,7 @@ async fn main() -> ExitCode {
 }
 
 fn unreachable_history() -> Result<ExitCode, String> {
-    Err("history subcommands are handled before the daemon client".to_owned())
+    Err("history and read subcommands are handled before the daemon client".to_owned())
 }
 
 fn run_history(source: &Source, args: &HistoryArgs) -> ExitCode {
@@ -219,6 +273,16 @@ fn run_history(source: &Source, args: &HistoryArgs) -> ExitCode {
         Ok(text) => {
             print!("{text}");
             exit_for(!text.is_empty())
+        }
+        Err(error) => fail(&error.to_string()),
+    }
+}
+
+fn print_read(reply: Result<String, ss::read::ReadError>) -> ExitCode {
+    match reply {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::from(EXIT_HITS)
         }
         Err(error) => fail(&error.to_string()),
     }
