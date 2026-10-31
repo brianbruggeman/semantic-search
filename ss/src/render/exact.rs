@@ -9,7 +9,10 @@ use std::path::Path;
 
 use crate::exact::FileMatches;
 
-use super::{FOOTER_CHARS, shown};
+use super::shown;
+
+/// Characters held back for the longer exact `cut:` line (flags that show more included).
+const EXACT_FOOTER_CHARS: usize = 110;
 
 struct Piece {
     file: usize,
@@ -107,7 +110,7 @@ pub fn exact_text(files: &[FileMatches], here: &Path, budget: usize) -> String {
     let mut kept = select(&all, limit, overhead);
     let mut note = String::new();
     if kept.len() < all.len() {
-        kept = select(&all, limit.saturating_sub(FOOTER_CHARS), overhead);
+        kept = select(&all, limit.saturating_sub(EXACT_FOOTER_CHARS), overhead);
         note = footer(files, &all, &kept, budget);
     }
     format!("{head}{}{note}", body(files, &all, &kept))
@@ -134,5 +137,9 @@ fn footer(files: &[FileMatches], all: &[Piece], kept: &HashSet<usize>, budget: u
     if parts.is_empty() {
         return String::new();
     }
-    format!("cut: {} (use --budget {})\n", parts.join(", "), budget * 2)
+    format!(
+        "cut: {} (use --budget {}, --per-file 20, or a narrower path or glob)\n",
+        parts.join(", "),
+        budget * 2
+    )
 }

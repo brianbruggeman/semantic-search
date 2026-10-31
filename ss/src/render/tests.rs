@@ -171,7 +171,7 @@ fn an_exact_flood_is_capped_at_the_budget_and_says_what_it_cut() {
     assert!(tokens(&text) <= 120, "{} tokens\n{text}", tokens(&text));
     assert!(text.starts_with(&format!("{total} matches in {} files\n", files.len())));
     assert!(text.contains("\ncut: "), "{text}");
-    assert!(text.contains("(use --budget 240)"), "{text}");
+    assert!(text.contains("use --budget 240"), "{text}");
 }
 
 #[test]

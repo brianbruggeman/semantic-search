@@ -8,8 +8,8 @@ use ss::exact::compile;
 use ss::exact::plain::{Context, files_of, globs, pattern_source, scan_rows};
 use ss::history::{Source, View, render as render_history};
 use ss::render::{
-    COMPACT_BUDGET, Compact, EXACT_BUDGET, Layout, Mode, compact_text, exact_reply, facets,
-    findings_json, findings_text, graph_json, graph_text, lines_text,
+    COMPACT_BUDGET, Compact, Layout, Mode, compact_text, exact_reply, facets, findings_json,
+    findings_text, graph_json, graph_text, lines_text,
 };
 use ss::settings::Settings;
 use ss_proto::{Hit, Request, Response};
@@ -22,12 +22,7 @@ const EXIT_ERROR: u8 = 2;
 // clap switches are independent flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Parser)]
-#[command(
-    name = "ss",
-    version,
-    args_conflicts_with_subcommands = true,
-    disable_help_flag = true
-)]
+#[command(name = "ss", version, args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -100,14 +95,11 @@ struct Cli {
     #[arg(short = 'H', long)]
     with_filename: bool,
     /// Exact search: no path prefix on matches
-    #[arg(short = 'h', long)]
+    #[arg(long)]
     no_filename: bool,
     /// Exact search: print `line:` before each match (grep's -n)
     #[arg(long)]
     line_number: bool,
-    /// Print help
-    #[arg(long, action = clap::ArgAction::Help)]
-    help: Option<bool>,
     /// Matches shown per file in an exact search; more are counted as `+N more`
     #[arg(long, default_value_t = 5)]
     per_file: usize,
@@ -340,12 +332,12 @@ fn grep_argv(args: Vec<OsString>) -> Vec<OsString> {
     if !exact {
         return args;
     }
-    let mut numbered = false;
+    let mut seen: Vec<OsString> = Vec::new();
     args.into_iter()
         .flat_map(exact_switches)
         .filter(|arg| {
-            let repeat = arg == "--line-number" && numbered;
-            numbered |= arg == "--line-number";
+            let repeat = (arg == "--line-number" || arg == "--no-filename") && seen.contains(arg);
+            seen.push(arg.clone());
             !repeat
         })
         .collect()
@@ -356,10 +348,15 @@ fn exact_switches(arg: OsString) -> Vec<OsString> {
         return vec![arg];
     }
     let text = arg.to_string_lossy();
-    let rest: String = text.chars().filter(|letter| *letter != 'n').collect();
+    let rest: String = text
+        .chars()
+        .filter(|letter| !"nh".contains(*letter))
+        .collect();
     let mut out = Vec::new();
-    if text.contains('n') {
-        out.push(OsString::from("--line-number"));
+    for (letter, long) in [('n', "--line-number"), ('h', "--no-filename")] {
+        if text[1..].contains(letter) {
+            out.push(OsString::from(long));
+        }
     }
     if rest != "-" {
         out.push(OsString::from(rest));
@@ -425,10 +422,7 @@ async fn run_exact(cli: &Cli) -> Result<ExitCode, String> {
         tokio::task::spawn_blocking(move || scan_rows(&files_of(&paths, &filter), &regex, around))
             .await
             .map_err(|error| error.to_string())?;
-    print!(
-        "{}",
-        exact_reply(&files, &here, layout, cli.budget.unwrap_or(EXACT_BUDGET))
-    );
+    print!("{}", exact_reply(&files, &here, layout, cli.budget));
     Ok(exit_for(!files.is_empty()))
 }
 

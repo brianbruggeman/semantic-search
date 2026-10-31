@@ -28,7 +28,13 @@ const FOOTER_CHARS: usize = 72;
 /// Default `--compact` budget in tokens.
 pub const COMPACT_BUDGET: usize = 250;
 /// Default budget in tokens of an exact search reply.
-pub const EXACT_BUDGET: usize = 300;
+pub const EXACT_BUDGET: usize = 800;
+
+/// Longest raw exact reply (lines) printed byte for byte when no `--budget` is given.
+pub const PASSTHROUGH_LINES: usize = 200;
+
+/// Longest raw exact reply (characters) printed byte for byte when no `--budget` is given.
+pub const PASSTHROUGH_CHARS: usize = 8000;
 
 pub const FOOTER_RESERVE: usize = 14;
 
