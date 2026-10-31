@@ -338,3 +338,30 @@ async fn status_reports_warm_for_a_warmed_pool_and_not_for_a_lazy_one() {
     assert!(warm_status.warm, "{warm_status:?}");
     assert!(!lazy_status.warm, "{lazy_status:?}");
 }
+
+#[proxima::test(runtime = "tokio")]
+async fn a_model_load_slower_than_the_warm_bound_serves_degraded_instead_of_hanging() {
+    let env = Env::new();
+    let settings = Settings {
+        spawn_timeout_ms: 400,
+        ..env.settings()
+    };
+    let slow = EmbedPool::with_lanes_warm(1, 1, || {
+        std::thread::sleep(Duration::from_secs(3));
+        Ok(hash_embed)
+    });
+    let started = std::time::Instant::now();
+
+    let daemon = tokio::spawn(run(settings.clone(), Some(slow)));
+    let client = Client::new(settings);
+    wait_until_listening(&client).await;
+    let listening_after = started.elapsed();
+    let status = status_of(&client).await;
+    stop(&client, daemon).await;
+
+    assert!(
+        listening_after < Duration::from_secs(2),
+        "{listening_after:?}"
+    );
+    assert!(!status.warm, "{status:?}");
+}
