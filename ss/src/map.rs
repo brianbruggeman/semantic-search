@@ -121,7 +121,7 @@ fn select(root: &str, grouped: (Vec<MapDir>, usize), budget: usize) -> Map {
     let (dirs, hidden) = grouped;
     let total: usize = dirs.iter().map(|dir| dir.files.len()).sum::<usize>() + hidden;
     let with_purpose = dirs.iter().flat_map(|dir| &dir.files).filter(|file| file.purpose.is_some()).count();
-    let room = (budget * 4).saturating_sub(CUT_RESERVE_CHARS);
+    let char_room = (budget * 4).saturating_sub(CUT_RESERVE_CHARS);
     let mut used = 0;
     let mut kept: Vec<MapDir> = Vec::new();
     let mut counts = Vec::new();
@@ -131,7 +131,7 @@ fn select(root: &str, grouped: (Vec<MapDir>, usize), budget: usize) -> Map {
         let mut shown = Vec::new();
         for file in &dir.files {
             let cost = file_line(file).len() + if shown.is_empty() { header.len() } else { 0 };
-            if used + cost > room && !(kept.is_empty() && shown.is_empty()) {
+            if used + cost > char_room && !(kept.is_empty() && shown.is_empty()) {
                 cut += 1;
             } else {
                 used += cost;
@@ -148,7 +148,7 @@ fn select(root: &str, grouped: (Vec<MapDir>, usize), budget: usize) -> Map {
 }
 
 fn percent(with_purpose: usize, total: usize) -> usize {
-    if total == 0 { 0 } else { with_purpose * 100 / total }
+    (with_purpose * 100).checked_div(total).unwrap_or(0)
 }
 
 /// The default text output of a map: directory lines, file lines, the `cut:` line and the coverage line.
@@ -388,6 +388,6 @@ mod tests {
         assert_eq!(value["files"].as_array().map(Vec::len), Some(2));
         assert_eq!(value["dirs"][0]["path"], "src");
         assert_eq!(value["coverage"], json!({"with": 1, "total": 2, "percent": 50}));
-        assert_eq!(value["files"][0]["purpose"].is_null() || value["files"][1]["purpose"].is_null(), true);
+        assert!(value["files"][0]["purpose"].is_null() || value["files"][1]["purpose"].is_null());
     }
 }
