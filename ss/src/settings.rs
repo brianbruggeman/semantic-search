@@ -4,7 +4,7 @@ use conflaguration::Settings as ConfigSettings;
 use proxima::pipe::FailMode;
 use ss_ipc::Endpoint;
 
-use crate::embed::{EmbedProfile, EmbedderKind, Provider};
+use crate::embed::{DEFAULT_MODEL, EmbedProfile, EmbedderKind, Provider, parse_model};
 use crate::store::StoreConfig;
 
 /// Every tunable, loadable from `SS_*` environment variables (`SS_QUERY_CAP=4`) or built in code.
@@ -26,6 +26,9 @@ pub struct Settings {
     /// Load every embed worker's model and run one embed at daemon start, so no query pays the load; the daemon accepts connections once the query workers are warm
     #[setting(default = true)]
     pub warm_start: bool,
+    /// Which fastembed model embeds chunks and queries (`bge-small-en-v1.5`, `jina-embeddings-v2-base-code`, ...); changing it re-embeds every index
+    #[setting(default_str = "bge-small-en-v1.5")]
+    pub embed_model: String,
     /// Where the fastembed model runs: `cpu` or `coreml` (macos GPU); changing it re-embeds every index
     #[setting(default_str = "cpu")]
     pub embed_provider: String,
@@ -135,6 +138,7 @@ impl Settings {
     #[must_use]
     pub fn embed_profile(&self) -> EmbedProfile {
         EmbedProfile {
+            model: parse_model(&self.embed_model).unwrap_or(DEFAULT_MODEL),
             provider: Provider::parse(&self.embed_provider).unwrap_or_default(),
             max_length: self.embed_max_length.max(1),
         }
@@ -287,6 +291,24 @@ mod tests {
             coreml.store_config(root).model_id,
             "bge-small-en-v1.5+coreml+len128"
         );
+    }
+
+    #[test]
+    fn embed_model_reaches_the_store_identity_and_unknown_names_fall_back_to_the_default() {
+        let jina = temp_env::with_vars(
+            [("SS_EMBED_MODEL", Some("jina-embeddings-v2-base-code"))],
+            || Settings::from_env().expect("jina settings"),
+        );
+        let unknown = temp_env::with_vars([("SS_EMBED_MODEL", Some("no-such-model"))], || {
+            Settings::from_env().expect("unknown settings")
+        });
+
+        let root = Path::new("/work/a");
+        assert_eq!(
+            jina.store_config(root).model_id,
+            "jina-embeddings-v2-base-code+cpu+len256"
+        );
+        assert_eq!(unknown.embed_profile().model, "bge-small-en-v1.5");
     }
 
     #[test]

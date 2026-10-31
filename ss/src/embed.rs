@@ -82,9 +82,43 @@ impl Provider {
     }
 }
 
-/// The model-side knobs that change the vectors: execution provider and token truncation length.
+pub const DEFAULT_MODEL: &str = "bge-small-en-v1.5";
+
+/// The fastembed models `SS_EMBED_MODEL` can select, by label. The label is what the store identity records.
+pub const MODELS: [(&str, fastembed::EmbeddingModel); 8] = [
+    (
+        "bge-small-en-v1.5",
+        fastembed::EmbeddingModel::BGESmallENV15,
+    ),
+    ("bge-base-en-v1.5", fastembed::EmbeddingModel::BGEBaseENV15),
+    (
+        "jina-embeddings-v2-base-code",
+        fastembed::EmbeddingModel::JinaEmbeddingsV2BaseCode,
+    ),
+    (
+        "jina-embeddings-v2-base-en",
+        fastembed::EmbeddingModel::JinaEmbeddingsV2BaseEN,
+    ),
+    (
+        "nomic-embed-text-v1.5",
+        fastembed::EmbeddingModel::NomicEmbedTextV15,
+    ),
+    ("gte-base-en-v1.5", fastembed::EmbeddingModel::GTEBaseENV15),
+    (
+        "snowflake-arctic-embed-s",
+        fastembed::EmbeddingModel::SnowflakeArcticEmbedS,
+    ),
+    (
+        "snowflake-arctic-embed-m",
+        fastembed::EmbeddingModel::SnowflakeArcticEmbedM,
+    ),
+];
+
+/// The model-side knobs that change the vectors: model, execution provider and token truncation length.
+/// `model` is a label from [`MODELS`]; the vector dimension comes from the model, see [`EmbedProfile::dim`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmbedProfile {
+    pub model: &'static str,
     pub provider: Provider,
     pub max_length: usize,
 }
@@ -92,13 +126,41 @@ pub struct EmbedProfile {
 impl Default for EmbedProfile {
     fn default() -> Self {
         Self {
+            model: DEFAULT_MODEL,
             provider: Provider::Cpu,
             max_length: EMBED_MAX_TOKENS,
         }
     }
 }
 
+/// The label of a known model; `None` for a name outside [`MODELS`].
+#[must_use]
+pub fn parse_model(name: &str) -> Option<&'static str> {
+    MODELS
+        .iter()
+        .map(|(label, _)| *label)
+        .find(|label| label.eq_ignore_ascii_case(name.trim()))
+}
+
 impl EmbedProfile {
+    /// The fastembed model this profile loads; an unknown label falls back to the default model.
+    #[must_use]
+    pub fn embedding_model(self) -> fastembed::EmbeddingModel {
+        MODELS
+            .iter()
+            .find(|(label, _)| *label == self.model)
+            .map_or_else(fastembed::EmbeddingModel::default, |(_, model)| {
+                model.clone()
+            })
+    }
+
+    /// Vector length, read from the model's own info so no dimension is hard-coded.
+    #[must_use]
+    pub fn dim(self) -> usize {
+        TextEmbedding::get_model_info(&self.embedding_model())
+            .map_or(FASTEMBED_DIM, |info| info.dim)
+    }
+
     /// The identity a store pins: a vector index built under one id is wiped, not mixed, when opened under another.
     /// The hash embedder has no provider or truncation, so its id is just the model.
     #[must_use]
@@ -107,7 +169,7 @@ impl EmbedProfile {
             EmbedderKind::Hash => kind.model_id().to_owned(),
             EmbedderKind::FastEmbed => format!(
                 "{}+{}+len{}",
-                kind.model_id(),
+                self.model,
                 self.provider.name(),
                 self.max_length
             ),
@@ -456,17 +518,21 @@ fn flush(current: &mut String, found: &mut Vec<String>) {
     }
 }
 
-/// Builds the fastembed model: `SS_MODEL_DIR`, then a local Hugging Face snapshot, then a download.
+/// Builds the fastembed model: for the default model `SS_MODEL_DIR`, then a local Hugging Face snapshot; otherwise (or
+/// failing both) a download into `cache_dir`.
 pub fn load_fastembed(
     cache_dir: &std::path::Path,
     intra_threads: usize,
     profile: EmbedProfile,
 ) -> Result<impl FnMut(&[String]) -> EmbedOutput + use<>, EmbedError> {
     let providers = execution_providers(profile.provider);
-    let mut engine = match local_snapshot() {
+    let snapshot = (profile.model == DEFAULT_MODEL)
+        .then(local_snapshot)
+        .flatten();
+    let mut engine = match snapshot {
         Some(snapshot) => from_snapshot(&snapshot, intra_threads, profile.max_length, providers)?,
         None => TextEmbedding::try_new(
-            TextInitOptions::new(fastembed::EmbeddingModel::BGESmallENV15)
+            TextInitOptions::new(profile.embedding_model())
                 .with_cache_dir(cache_dir.to_path_buf())
                 .with_max_length(profile.max_length)
                 .with_intra_threads(intra_threads)
@@ -578,6 +644,36 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
+
+    #[test]
+    fn every_listed_model_reports_its_dimension_from_fastembed() {
+        let dims: Vec<(&str, usize)> = MODELS
+            .iter()
+            .map(|(label, _)| {
+                (
+                    *label,
+                    EmbedProfile {
+                        model: label,
+                        ..EmbedProfile::default()
+                    }
+                    .dim(),
+                )
+            })
+            .collect();
+
+        assert_eq!(dims[0], ("bge-small-en-v1.5", FASTEMBED_DIM));
+        assert_eq!(dims[2], ("jina-embeddings-v2-base-code", 768));
+        assert!(dims.iter().all(|(_, dim)| *dim >= 384), "{dims:?}");
+    }
+
+    #[test]
+    fn model_names_parse_case_insensitively_and_unknown_names_are_none() {
+        assert_eq!(
+            parse_model("Jina-Embeddings-V2-Base-Code"),
+            Some("jina-embeddings-v2-base-code")
+        );
+        assert_eq!(parse_model("nope"), None);
+    }
 
     #[test]
     fn tokens_split_snake_and_camel_case() {
@@ -794,7 +890,9 @@ mod tests {
             libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr());
             usage.assume_init()
         };
-        let micros = |time: libc::timeval| time.tv_sec.unsigned_abs() * 1_000_000 + u64::from(time.tv_usec.unsigned_abs());
+        let micros = |time: libc::timeval| {
+            time.tv_sec.unsigned_abs() * 1_000_000 + u64::from(time.tv_usec.unsigned_abs())
+        };
         micros(usage.ru_utime) + micros(usage.ru_stime)
     }
 
@@ -859,7 +957,7 @@ mod tests {
             .await
             .expect("single embedding");
         let same = cosine(&alone[0], &vectors[0]);
-        assert_eq!(vectors[0].len(), FASTEMBED_DIM);
+        assert_eq!(vectors[0].len(), EmbedProfile::default().dim());
         assert!(near > far, "near={near} far={far}");
         assert!(same > 0.999, "grouping changed the vector: cosine {same}");
     }

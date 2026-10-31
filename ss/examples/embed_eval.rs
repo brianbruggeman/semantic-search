@@ -23,7 +23,8 @@ use proxima::pipe::Pipe;
 use serde::{Deserialize, Serialize};
 use ss::chunk::{Language, chunk_source};
 use ss::embed::{
-    EmbedPool, EmbedProfile, EmbedRequest, EmbedderKind, Lane, Provider, load_fastembed, tokens,
+    DEFAULT_MODEL, EmbedPool, EmbedProfile, EmbedRequest, EmbedderKind, Lane, Provider,
+    load_fastembed, parse_model, tokens,
 };
 use ss::index::{Shard, index_tree};
 use ss::query::search;
@@ -36,14 +37,17 @@ const LONG_TOKENS: usize = 128;
 const DEPTH: usize = 50;
 
 fn profile_of(arm: &str) -> EmbedProfile {
-    let provider = match &arm[..3] {
+    let (spec, label) = arm.split_once('@').unwrap_or((arm, DEFAULT_MODEL));
+    let model = parse_model(label).expect("known model label");
+    let provider = match &spec[..3] {
         "gpu" => Provider::CoreMlGpu,
         "all" => Provider::CoreMlAll,
         _ => Provider::Cpu,
     };
     EmbedProfile {
+        model,
         provider,
-        max_length: arm[3..].parse().expect("arm max_length"),
+        max_length: spec[3..].parse().expect("arm max_length"),
     }
 }
 
@@ -173,6 +177,10 @@ struct RunRecord {
     chunks: u64,
     embedded: u64,
     per_chunk_ms: f64,
+    #[serde(default)]
+    query_embed_ms: f64,
+    #[serde(default)]
+    dim: usize,
     queries: Vec<QueryRun>,
 }
 
@@ -200,7 +208,8 @@ async fn run_arm(arm: &str, run: usize, out: &Path) {
     let queries = load_queries();
     let uptime_before = uptime_load();
     let cache = tempfile::tempdir().expect("model cache");
-    let cache_path = cache.path().to_path_buf();
+    let cache_path = std::env::var_os("SS_EVAL_MODEL_CACHE")
+        .map_or_else(|| cache.path().to_path_buf(), PathBuf::from);
 
     let load_started = Instant::now();
     let model = load_fastembed(&cache_path, 2, profile).expect("model load");
@@ -227,7 +236,9 @@ async fn run_arm(arm: &str, run: usize, out: &Path) {
         .map(|(path, start, end, _)| chunk_id(&path, start, end))
         .collect();
     let mut query_runs = Vec::new();
+    let mut query_embed_total = 0.0_f64;
     for query in &queries {
+        let query_started = Instant::now();
         assert!(
             known.contains(&query.gold),
             "gold chunk missing: {}",
@@ -241,6 +252,7 @@ async fn run_arm(arm: &str, run: usize, out: &Path) {
             .await
             .expect("embed query")
             .remove(0);
+        query_embed_total += query_started.elapsed().as_secs_f64() * 1000.0;
         let by_vector = ids_of(
             &store,
             &store.vector_search(&embedding, "", DEPTH).expect("vector"),
@@ -281,6 +293,8 @@ async fn run_arm(arm: &str, run: usize, out: &Path) {
         chunks: stats.chunks_seen,
         embedded: stats.chunks_embedded,
         per_chunk_ms: cold_index_s * 1000.0 / stats.chunks_embedded.max(1) as f64,
+        query_embed_ms: query_embed_total / queries.len().max(1) as f64,
+        dim: profile.dim(),
         queries: query_runs,
     };
     std::fs::create_dir_all(out).expect("out dir");
@@ -502,6 +516,136 @@ fn report(out: &Path) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Half {
+    Dev,
+    Held,
+    All,
+}
+
+fn start_line(gold: &str) -> u32 {
+    let range = gold.rsplit(':').next().unwrap_or_default();
+    range
+        .split('-')
+        .next()
+        .and_then(|text| text.parse().ok())
+        .expect("gold start line")
+}
+
+fn in_half(query: &QueryRun, half: Half) -> bool {
+    match half {
+        Half::Dev => start_line(&query.gold) % 2 == 1,
+        Half::Held => start_line(&query.gold) % 2 == 0,
+        Half::All => true,
+    }
+}
+
+fn quality_of(record: &RunRecord, half: Half, vector: bool) -> Quality {
+    let ranks: Vec<usize> = record
+        .queries
+        .iter()
+        .filter(|query| in_half(query, half))
+        .map(|query| {
+            if vector {
+                query.vector_rank
+            } else {
+                query.hybrid_rank
+            }
+        })
+        .collect();
+    assert!(!ranks.is_empty(), "N==0 queries in half");
+    quality(&ranks)
+}
+
+fn row(quality: &Quality) -> String {
+    format!(
+        "{:.3} {:.3} {:.3} {:.3}",
+        quality.hit1, quality.hit3, quality.hit5, quality.mrr
+    )
+}
+
+fn no_drop(base: &Quality, cand: &Quality) -> bool {
+    cand.hit1 >= base.hit1
+        && cand.hit3 >= base.hit3
+        && cand.hit5 >= base.hit5
+        && cand.mrr >= base.mrr
+}
+
+fn passes(base: &RunRecord, cand: &RunRecord, half: Half) -> bool {
+    let base_hybrid = quality_of(base, half, false);
+    let cand_hybrid = quality_of(cand, half, false);
+    let improves = cand_hybrid.hit3 > base_hybrid.hit3 || cand_hybrid.mrr > base_hybrid.mrr;
+    improves
+        && no_drop(&base_hybrid, &cand_hybrid)
+        && no_drop(&quality_of(base, half, true), &quality_of(cand, half, true))
+}
+
+fn model_report(out: &Path, arms: &[String]) {
+    let records: Vec<RunRecord> = arms
+        .iter()
+        .map(|arm| load_record(&out.join(format!("{arm}.1.run.json"))))
+        .collect();
+    assert!(records.len() >= 2, "need a baseline and a candidate");
+    for record in &records {
+        println!(
+            "{} | dim {} | load {:.2}s | cold {:.2}s | per_chunk {:.1}ms | query {:.1}ms | {}",
+            record.arm,
+            record.dim,
+            record.model_load_s,
+            record.cold_index_s,
+            record.per_chunk_ms,
+            record.query_embed_ms,
+            record.uptime_before
+        );
+        for (name, half) in [
+            ("dev", Half::Dev),
+            ("held-out", Half::Held),
+            ("all", Half::All),
+        ] {
+            println!(
+                "  {name:8} hybrid {} | vector {}",
+                row(&quality_of(record, half, false)),
+                row(&quality_of(record, half, true))
+            );
+        }
+    }
+    for cand in &records[1..] {
+        println!(
+            "RULE {}: dev {} held-out {}",
+            cand.arm,
+            passes(&records[0], cand, Half::Dev),
+            passes(&records[0], cand, Half::Held)
+        );
+        print_deltas(&records[0], cand);
+    }
+}
+
+fn print_deltas(base: &RunRecord, cand: &RunRecord) {
+    let mut deltas: Vec<(i64, &QueryRun, &QueryRun)> = base
+        .queries
+        .iter()
+        .zip(&cand.queries)
+        .map(|(before, after)| {
+            (
+                after.hybrid_rank as i64 - before.hybrid_rank as i64,
+                before,
+                after,
+            )
+        })
+        .collect();
+    deltas.sort_by_key(|delta| std::cmp::Reverse(delta.0.abs()));
+    for (_, before, after) in deltas.iter().take(10) {
+        println!(
+            "  hybrid {}->{} vector {}->{} | {}",
+            before.hybrid_rank,
+            after.hybrid_rank,
+            before.vector_rank,
+            after.vector_rank,
+            before.text
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -509,13 +653,15 @@ async fn main() {
         Some("chunks") => list_chunks(),
         Some("run") => {
             let arm = args.get(2).expect("arm");
-            assert!(ARMS.contains(&arm.as_str()), "unknown arm {arm}");
+            let spec = arm.split('@').next().unwrap_or_default();
+            assert!(ARMS.contains(&spec), "unknown arm {arm}");
             let run = args
                 .get(3)
                 .and_then(|text| text.parse().ok())
                 .expect("run number");
             run_arm(arm, run, Path::new(args.get(4).expect("out dir"))).await;
         }
+        Some("models") => model_report(Path::new(args.get(2).expect("out dir")), &args[3..]),
         Some("report") => report(Path::new(args.get(2).expect("out dir"))),
         _ => eprintln!("usage: embed_eval chunks | run <arm> <run> <out> | report <out>"),
     }

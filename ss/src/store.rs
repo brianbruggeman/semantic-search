@@ -646,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_or_max_length_change_wipes_vectors_so_they_are_never_mixed() {
+    fn a_model_provider_or_max_length_change_wipes_vectors_so_they_are_never_mixed() {
         let base = EmbedProfile::default();
         let coreml = EmbedProfile {
             provider: Provider::CoreMlGpu,
@@ -656,7 +656,11 @@ mod tests {
             max_length: 128,
             ..base
         };
-        for changed in [coreml, shorter] {
+        let other_model = EmbedProfile {
+            model: "jina-embeddings-v2-base-code",
+            ..base
+        };
+        for changed in [coreml, shorter, other_model] {
             let dir = tempfile::tempdir().expect("tempdir");
             drop(store_with_one_vector(
                 dir.path(),
@@ -806,6 +810,7 @@ mod tests {
         let profile = EmbedProfile {
             provider: Provider::CoreMlAll,
             max_length: 128,
+            ..EmbedProfile::default()
         };
 
         assert_eq!(
@@ -813,5 +818,18 @@ mod tests {
             "bge-small-en-v1.5+coreml_all+len128"
         );
         assert_eq!(profile.store_id(EmbedderKind::Hash), "feature-hash-256");
+    }
+
+    #[test]
+    fn store_identity_names_the_selected_model() {
+        let jina = EmbedProfile {
+            model: "jina-embeddings-v2-base-code",
+            ..EmbedProfile::default()
+        };
+
+        assert_eq!(
+            jina.store_id(EmbedderKind::FastEmbed),
+            "jina-embeddings-v2-base-code+cpu+len256"
+        );
     }
 }
