@@ -42,6 +42,7 @@ END;
 
 /// Bumped whenever the graph tables change shape or meaning; part of the pinned store identity.
 pub const GRAPH_VERSION: u32 = 1;
+const BUILD_ATTEMPTS: usize = 3;
 const WAL_ATTEMPTS: u32 = 200;
 const WAL_RETRY_PAUSE: Duration = Duration::from_millis(5);
 
@@ -266,11 +267,7 @@ impl Store {
 
     /// Write counter bumped by every transaction that changes chunks or vectors; read inside the caller's snapshot.
     pub fn generation(&self) -> rusqlite::Result<i64> {
-        let text: Option<String> = self
-            .conn
-            .query_row("SELECT v FROM meta WHERE k='gen'", [], |row| row.get(0))
-            .optional()?;
-        Ok(text.and_then(|value| value.parse().ok()).unwrap_or(0))
+        read_generation(&self.conn)
     }
 
     /// Exact cosine scan (vectors are stored unit-length) over chunks under `prefix`. Scores the in-memory
@@ -288,43 +285,30 @@ impl Store {
             .then(|| self.read_snapshot())
             .transpose()?;
         let generation = self.generation()?;
-        let cached = match vector_cache::lookup(&self.dir, generation) {
-            Some(snapshot) => Some(snapshot),
-            None => self.build_snapshot(generation)?,
-        };
-        match cached {
+        match self.snapshot_for(generation) {
             Some(snapshot) => Ok(snapshot.top(query, prefix, limit)),
             None => self.scan_sqlite(query, prefix, limit),
         }
     }
 
-    /// Loads every vector into memory and publishes it; `None` when over the limit or the dimensions disagree.
-    fn build_snapshot(&self, generation: i64) -> rusqlite::Result<Option<Arc<VectorSnapshot>>> {
-        let _rebuild = vector_cache::RebuildGuard::begin();
-        let (rows, bytes): (i64, i64) = self.conn.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(length(v.vec)), 0) FROM chunks c JOIN vectors v ON v.key = c.key",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let rows = usize::try_from(rows).unwrap_or(0);
-        let bytes = usize::try_from(bytes).unwrap_or(0);
-        if rows == 0 || bytes > vector_cache::limit_bytes() {
-            return Ok(None);
-        }
-        let mut snapshot = VectorSnapshot::new(generation, bytes / rows / 4);
-        let mut statement = self.conn.prepare_cached(
-            "SELECT c.id, c.path, v.vec FROM chunks c JOIN vectors v ON v.key = c.key",
-        )?;
-        let mut cursor = statement.query([])?;
-        while let Some(row) = cursor.next()? {
-            let (id, path): (i64, String) = (row.get(0)?, row.get(1)?);
-            if !snapshot.push(id, path, row.get_ref(2)?.as_blob()?) {
-                return Ok(None);
+    /// A snapshot that may serve `generation`, or `None` to scan SQLite. A newer generation than the cache
+    /// wakes the shard's one builder thread; the query waits on it unless bounded-stale serving applies.
+    fn snapshot_for(&self, generation: i64) -> Option<Arc<VectorSnapshot>> {
+        for _attempt in 0..BUILD_ATTEMPTS {
+            let found = vector_cache::servable(&self.dir, generation);
+            if found.as_ref().is_some_and(|snap| snap.generation() >= generation) {
+                return found;
+            }
+            let build = ensure_build(&self.dir);
+            if found.is_some() {
+                return found;
+            }
+            vector_cache::wait_on(&build);
+            if build.declined() {
+                return None;
             }
         }
-        let snapshot = Arc::new(snapshot);
-        vector_cache::publish(&self.dir, &snapshot);
-        Ok(Some(snapshot))
+        None
     }
 
     /// The uncached scan: reads every blob out of SQLite per call.
@@ -456,6 +440,65 @@ fn insert_edge(tx: &Transaction<'_>, path: &str, edge: &GraphEdge) -> rusqlite::
         ],
     )?;
     Ok(())
+}
+
+fn read_generation(conn: &Connection) -> rusqlite::Result<i64> {
+    let text: Option<String> = conn
+        .query_row("SELECT v FROM meta WHERE k='gen'", [], |row| row.get(0))
+        .optional()?;
+    Ok(text.and_then(|value| value.parse().ok()).unwrap_or(0))
+}
+
+/// Joins the shard's in-flight build or starts one on a dedicated thread, so no query worker ever builds.
+fn ensure_build(dir: &Path) -> Arc<vector_cache::Build> {
+    let (build, creator) = vector_cache::single_flight(dir);
+    if creator {
+        let (owned, running) = (dir.to_path_buf(), Arc::clone(&build));
+        let spawned = std::thread::Builder::new()
+            .name("ss-vector-build".to_owned())
+            .spawn(move || {
+                let declined = !matches!(load_snapshot(&owned), Ok(Some(_)));
+                vector_cache::retire(&owned);
+                running.finish(declined);
+            });
+        if spawned.is_err() {
+            vector_cache::retire(dir);
+            build.finish(true);
+        }
+    }
+    build
+}
+
+/// Loads every vector at one read snapshot and publishes it; `None` when over the limit or dimensions disagree.
+fn load_snapshot(dir: &Path) -> rusqlite::Result<Option<Arc<VectorSnapshot>>> {
+    let _rebuild = vector_cache::RebuildGuard::begin();
+    let conn = Connection::open(dir.join("index.db"))?;
+    conn.execute_batch("PRAGMA busy_timeout=10000;")?;
+    let read = conn.unchecked_transaction()?;
+    let generation = read_generation(&read)?;
+    let (rows, bytes): (i64, i64) = read.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(length(v.vec)), 0) FROM chunks c JOIN vectors v ON v.key = c.key",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let rows = usize::try_from(rows).unwrap_or(0);
+    let bytes = usize::try_from(bytes).unwrap_or(0);
+    if rows == 0 || bytes > vector_cache::limit_bytes() {
+        return Ok(None);
+    }
+    let mut snapshot = VectorSnapshot::new(generation, bytes / rows / 4);
+    let mut statement =
+        read.prepare("SELECT c.id, c.path, v.vec FROM chunks c JOIN vectors v ON v.key = c.key")?;
+    let mut cursor = statement.query([])?;
+    while let Some(row) = cursor.next()? {
+        let (id, path): (i64, String) = (row.get(0)?, row.get(1)?);
+        if !snapshot.push(id, path, row.get_ref(2)?.as_blob()?) {
+            return Ok(None);
+        }
+    }
+    let snapshot = Arc::new(snapshot);
+    vector_cache::publish(dir, &snapshot);
+    Ok(Some(snapshot))
 }
 
 fn bump_generation(conn: &Connection) -> rusqlite::Result<()> {
@@ -709,5 +752,110 @@ mod tests {
             "bge-small-en-v1.5+coreml_all+len128"
         );
         assert_eq!(profile.store_id(EmbedderKind::Hash), "feature-hash-256");
+    }
+}
+
+#[cfg(test)]
+mod single_flight_tests {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+
+    use super::vector_cache::{self, IndexRun};
+    use super::*;
+    use crate::chunk::chunk_key;
+
+    fn open(dir: &Path) -> Store {
+        Store::open(&StoreConfig {
+            dir: dir.to_path_buf(),
+            model_id: "feature-hash-256".to_owned(),
+        })
+        .expect("open store")
+    }
+
+    fn write_file(store: &mut Store, number: usize) {
+        let text = format!("pub fn reindexed_{number}() {{}}");
+        let key = chunk_key(&text);
+        let chunk = RawChunk {
+            start_line: 1,
+            end_line: 1,
+            text,
+            key,
+        };
+        let row = FileRow {
+            mtime_ns: 1,
+            size: 1,
+            hash: key,
+        };
+        store
+            .replace_file(
+                &format!("src/f{number}.rs"),
+                &row,
+                &[chunk],
+                &[(key, vec![1.0, 0.0])],
+                &FileGraph::default(),
+            )
+            .expect("replace file");
+    }
+
+    #[test]
+    fn quiescent_write_then_query_sees_the_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = open(dir.path());
+        write_file(&mut store, 0);
+        assert_eq!(store.vector_search(&[1.0, 0.0], "", 10).expect("first").len(), 1);
+
+        write_file(&mut store, 1);
+        let hits = store.vector_search(&[1.0, 0.0], "", 10).expect("second");
+
+        assert_eq!(hits.len(), 2, "a write with no index run active must be visible");
+    }
+
+    #[test]
+    fn a_snapshot_older_than_the_stale_bound_is_not_served() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = open(dir.path());
+        write_file(&mut store, 0);
+        store.vector_search(&[1.0, 0.0], "", 10).expect("publish");
+        let _run = IndexRun::begin();
+        vector_cache::set_stale_ms(30);
+        write_file(&mut store, 1);
+        thread::sleep(Duration::from_millis(80));
+
+        let hits = store.vector_search(&[1.0, 0.0], "", 10).expect("search");
+
+        vector_cache::set_stale_ms(2000);
+        assert_eq!(hits.len(), 2, "an expired snapshot must wait for the rebuild");
+    }
+
+    #[test]
+    fn concurrent_searches_during_a_reindex_start_few_rebuilds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut writer = open(dir.path());
+        write_file(&mut writer, 0);
+        writer.vector_search(&[1.0, 0.0], "", 10).expect("warm");
+        let started_before = vector_cache::counters().started;
+        let _run = IndexRun::begin();
+        let gate = Arc::new(Barrier::new(33));
+        let searchers: Vec<_> = (0..32)
+            .map(|_| {
+                let (gate, path) = (Arc::clone(&gate), dir.path().to_path_buf());
+                thread::spawn(move || {
+                    let store = open(&path);
+                    gate.wait();
+                    (0..5)
+                        .map(|_| store.vector_search(&[1.0, 0.0], "", 10).expect("search").len())
+                        .min()
+                })
+            })
+            .collect();
+        gate.wait();
+        (1..=200).for_each(|number| write_file(&mut writer, number));
+
+        for searcher in searchers {
+            assert!(searcher.join().expect("thread").is_some_and(|least| least > 0));
+        }
+        let started = vector_cache::counters().started - started_before;
+        assert!(started <= 4, "rebuilds_started was {started}");
     }
 }

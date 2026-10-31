@@ -77,6 +77,9 @@ pub struct Settings {
     /// Megabytes of vectors the daemon may hold in memory per process; a larger index scans SQLite instead
     #[setting(default = 512)]
     pub vector_cache_mb: usize,
+    /// Milliseconds an older vector snapshot may keep serving searches while an index run is active
+    #[setting(default = 2000)]
+    pub vector_cache_stale_ms: u64,
     /// Path to the `ssd` binary; empty selects the sibling of the running executable
     #[setting(default_str = "")]
     pub daemon_bin: String,

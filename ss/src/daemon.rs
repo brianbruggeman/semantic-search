@@ -86,6 +86,7 @@ pub struct Core {
 impl Core {
     fn new(settings: Settings, pool: EmbedPool, registry: Registry) -> Self {
         vector_cache::set_limit_mb(settings.vector_cache_mb);
+        vector_cache::set_stale_ms(settings.vector_cache_stale_ms);
         Self {
             settings,
             hub: WatchHub::default(),
@@ -227,6 +228,8 @@ impl Core {
                     rebuilds_published: counters.published,
                     rebuilds_in_flight: counters.in_flight,
                     max_in_flight: counters.max_in_flight,
+                    served_stale: counters.served_stale,
+                    waited_on_build: counters.waited_on_build,
                 }
             },
         }

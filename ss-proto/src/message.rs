@@ -95,4 +95,8 @@ pub struct VectorCacheStatus {
     pub rebuilds_published: u64,
     pub rebuilds_in_flight: u64,
     pub max_in_flight: u64,
+    #[serde(default)]
+    pub served_stale: u64,
+    #[serde(default)]
+    pub waited_on_build: u64,
 }
