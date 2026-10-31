@@ -197,7 +197,7 @@ enum Command {
         /// Cap the reply at about this many tokens (chars / 4); default 600
         #[arg(long)]
         budget: Option<usize>,
-        /// Show only directories nested at most this many levels below DIR (0 = files directly in DIR)
+        /// Directory levels shown below DIR (1 = top-level entries only); default budget / 250, at least 1
         #[arg(long)]
         depth: Option<usize>,
         /// Print the map as JSON (schema in `ai_docs/map.md`)
