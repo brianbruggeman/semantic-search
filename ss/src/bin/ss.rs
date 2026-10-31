@@ -31,8 +31,8 @@ Usage: ss [OPTIONS] <QUERY>... | ss <COMMAND>
   ss graph SYMBOL    callers, callees, members
   ss def|refs SYM    scip definition, references
   ss scip load FILE  load a scip index
-  ss show REV|diff   symbol-level change summary
-  ss map [DIR]       dirs, files, purposes
+  ss show REV|diff   symbol-level changes
+  ss map [DIR]       file purposes
   ss index PATH      index a directory
   ss --help          all options
 ";
