@@ -575,6 +575,8 @@ fn from_snapshot(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
 
     #[test]
@@ -694,6 +696,130 @@ mod tests {
             .await;
 
         assert_eq!(outcome, Err(EmbedError::CountMismatch { want: 1, got: 0 }));
+    }
+
+    fn counting_factory(
+        loads: &Arc<AtomicUsize>,
+        delay: std::time::Duration,
+    ) -> impl Fn() -> Result<fn(&[String]) -> EmbedOutput, EmbedError> + Send + Sync + 'static {
+        let loads = Arc::clone(loads);
+        move || {
+            thread::sleep(delay);
+            loads.fetch_add(1, Ordering::SeqCst);
+            Ok(hash_embed as fn(&[String]) -> EmbedOutput)
+        }
+    }
+
+    fn request(lane: Lane) -> EmbedRequest {
+        EmbedRequest {
+            texts: vec!["walk files".to_owned()],
+            lane,
+        }
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn readiness_waits_for_the_query_workers_to_finish_loading() {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let delay = std::time::Duration::from_millis(150);
+        let pool = EmbedPool::with_lanes_warm(2, 1, counting_factory(&loads, delay));
+
+        let warm_before = pool.is_warm();
+        pool.warm_query().await.expect("query workers warm");
+
+        assert!(!warm_before, "reported warm before any model loaded");
+        assert!(pool.is_warm());
+        assert!(
+            loads.load(Ordering::SeqCst) >= 2,
+            "both query models loaded before readiness"
+        );
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn searches_after_readiness_never_call_the_model_factory_again() {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let pool =
+            EmbedPool::with_lanes_warm(2, 2, counting_factory(&loads, std::time::Duration::ZERO));
+        pool.warm_query().await.expect("query workers warm");
+        while pool.index_warmed() < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        for _ in 0..6 {
+            pool.call(request(Lane::Query)).await.expect("query embed");
+            pool.call(request(Lane::Index)).await.expect("index embed");
+        }
+
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            4,
+            "one load per worker: 2 query + 2 index"
+        );
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn a_model_load_failure_surfaces_as_an_error_not_a_hang() {
+        let pool = EmbedPool::with_lanes_warm(1, 1, || {
+            Err::<fn(&[String]) -> EmbedOutput, _>(EmbedError::Model("no weights".to_owned()))
+        });
+
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_secs(5), pool.warm_query()).await;
+
+        assert!(
+            matches!(outcome, Ok(Err(EmbedError::Model(_)))),
+            "{outcome:?}"
+        );
+        assert!(!pool.is_warm());
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn a_lazy_pool_is_not_warm_and_loads_on_first_use() {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let pool = EmbedPool::with_lanes(1, 1, counting_factory(&loads, std::time::Duration::ZERO));
+
+        pool.warm_query().await.expect("lazy pool resolves at once");
+        let loaded_before = loads.load(Ordering::SeqCst);
+        pool.call(request(Lane::Query)).await.expect("query embed");
+
+        assert_eq!(
+            (loaded_before, pool.is_warm(), loads.load(Ordering::SeqCst)),
+            (0, false, 1)
+        );
+    }
+
+    fn cpu_micros() -> u64 {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: getrusage fills the zeroed rusage it is given; RUSAGE_SELF is always valid.
+        let usage = unsafe {
+            libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr());
+            usage.assume_init()
+        };
+        let micros = |time: libc::timeval| time.tv_sec.unsigned_abs() * 1_000_000 + u64::from(time.tv_usec.unsigned_abs());
+        micros(usage.ru_utime) + micros(usage.ru_stime)
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn real_model_first_query_after_warm_up_costs_within_3x_the_tenth_in_cpu_time() {
+        let cache = tempfile::tempdir().expect("model cache dir");
+        let cache_path = cache.path().to_path_buf();
+        let pool = EmbedPool::with_lanes_warm(1, 1, move || {
+            load_fastembed(&cache_path, 2, EmbedProfile::default())
+        });
+        pool.warm_query().await.expect("query worker warm");
+        let mut spent = Vec::new();
+        for _ in 0..10 {
+            let before = cpu_micros();
+            pool.call(request(Lane::Query)).await.expect("query embed");
+            spent.push(cpu_micros() - before);
+        }
+
+        println!("cpu us first={} tenth={}", spent[0], spent[9]);
+        assert!(
+            spent[0] <= 3 * spent[9].max(1_000),
+            "first {} tenth {}",
+            spent[0],
+            spent[9]
+        );
     }
 
     #[proxima::test(runtime = "tokio")]

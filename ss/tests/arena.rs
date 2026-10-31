@@ -321,3 +321,20 @@ async fn a_full_index_queue_under_drop_oldest_evicts_the_oldest_waiting_runs() {
     assert_eq!(status_of(&client).await.index_busy, 2);
     stop(&client, daemon).await;
 }
+
+#[proxima::test(runtime = "tokio")]
+async fn status_reports_warm_for_a_warmed_pool_and_not_for_a_lazy_one() {
+    let env = Env::new();
+    let warm = EmbedPool::with_lanes_warm(1, 1, || Ok(hash_embed));
+    let (client, daemon) = start(&env, env.settings(), warm).await;
+    let warm_status = status_of(&client).await;
+    stop(&client, daemon).await;
+    let lazy_env = Env::new();
+    let lazy = EmbedPool::spawn(1, || Ok(hash_embed));
+    let (lazy_client, lazy_daemon) = start(&lazy_env, lazy_env.settings(), lazy).await;
+    let lazy_status = status_of(&lazy_client).await;
+    stop(&lazy_client, lazy_daemon).await;
+
+    assert!(warm_status.warm, "{warm_status:?}");
+    assert!(!lazy_status.warm, "{lazy_status:?}");
+}
