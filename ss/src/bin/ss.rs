@@ -12,7 +12,7 @@ use ss::render::{
     COMPACT_BUDGET, Compact, Layout, Mode, compact_text, exact_reply, facets, findings_json,
     findings_text, graph_json, graph_text, lines_text,
 };
-use ss::scip::{REFS_BUDGET, find_defs, load_file, render_calls, render_defs, render_refs};
+use ss::scip::{REFS_BUDGET, scip_graph, find_defs, load_file, render_calls, render_defs, render_refs};
 use ss::settings::Settings;
 use ss::store::Store;
 use ss_proto::{Hit, Request, Response};
@@ -288,6 +288,12 @@ async fn main() -> ExitCode {
         Some(Command::Refs { target, root, budget }) => return run_scip_query(Query::Refs, target, root.as_deref(), *budget),
         _ => {}
     }
+    if let Some(Command::Graph { target, json: false, path, .. }) = &cli.command
+        && let Some(text) = scip_graph_text(target, path.as_deref())
+    {
+        print!("{text}");
+        return ExitCode::from(EXIT_HITS);
+    }
     let client = match Settings::load() {
         Ok(settings) => Client::new(settings),
         Err(error) => return fail(&format!("bad SS_* configuration: {error}")),
@@ -336,6 +342,13 @@ fn run_scip_query(query: Query, target: &str, root: Option<&Path>, budget: Optio
         }
         Err(message) => fail(&message),
     }
+}
+
+/// SCIP-resolved graph when this directory is an indexed root with SCIP rows; `None` falls back to the daemon.
+fn scip_graph_text(target: &str, path: Option<&Path>) -> Option<String> {
+    let root = PathBuf::from(absolute(path.unwrap_or(Path::new("."))).ok()?);
+    let store = Store::open_reader(&Settings::load().ok()?.store_config(&root)).ok()?;
+    scip_graph(&store, &root, target)
 }
 
 fn run_scip_load(index: &Path, root: Option<&Path>) -> ExitCode {

@@ -148,9 +148,10 @@ fn span(range: &[i32]) -> Option<(u32, u32, u32, u32)> {
 }
 
 pub const REFS_BUDGET: usize = 600;
+pub const GRAPH_BUDGET: usize = 400;
 
-/// Tag for a file's SCIP rows: `scip` while the file still hashes to the recorded blake3, `stale` once it
-/// differs, `none` when the file never had SCIP rows (callers fall back to name-resolved edges there).
+/// Tag for a file's SCIP rows: `resolved-fresh` while the file still hashes to the recorded blake3,
+/// `resolved-stale` once it differs, `syntactic` when the file never had SCIP rows (callers fall back to name-resolved edges there).
 #[must_use]
 pub fn freshness(store: &Store, root: &Path, file: &str) -> &'static str {
     let recorded = store.scip_hash(file).ok().flatten();
@@ -158,9 +159,9 @@ pub fn freshness(store: &Store, root: &Path, file: &str) -> &'static str {
         .ok()
         .map(|bytes| *blake3::hash(&bytes).as_bytes());
     match (recorded, current) {
-        (None, _) => "none",
-        (Some(old), Some(now)) if old == now => "scip",
-        _ => "stale",
+        (None, _) => "syntactic",
+        (Some(old), Some(now)) if old == now => "resolved-fresh",
+        _ => "resolved-stale",
     }
 }
 
@@ -199,7 +200,7 @@ pub fn render_defs(store: &Store, root: &Path, defs: &[DefRow]) -> String {
         let tag = freshness(store, root, &def.file);
         let _ = writeln!(
             text,
-            "{}:{}:{} {} {} resolved={tag}",
+            "{}:{}:{} {} {} {tag}",
             def.file,
             def.line + 1,
             def.col + 1,
@@ -274,7 +275,7 @@ pub fn render_calls(
         fits(
             &mut text,
             &format!(
-                "{} {} {}:{} resolved={tag}\n",
+                "{} {} {}:{} {tag}\n",
                 def.kind,
                 def.name,
                 def.file,
@@ -299,7 +300,7 @@ pub fn render_calls(
                 continue;
             };
             let row = format!(
-                "  caller {} {}:{} resolved={}\n",
+                "  caller {} {}:{} {}\n",
                 owner.name,
                 reference.file,
                 reference.line + 1,
@@ -312,6 +313,16 @@ pub fn render_calls(
     }
     cut_line(&mut text, cut);
     Ok(text)
+}
+
+/// The SCIP view of `ss graph <target>`: `None` when the root has no SCIP rows or the target has no SCIP
+/// definition, so the caller falls back to the name-resolved daemon reply (those edges are `syntactic`).
+pub fn scip_graph(store: &Store, root: &Path, target: &str) -> Option<String> {
+    let (_, _, files) = store.scip_counts().ok()?;
+    let defs = find_defs(store, target)
+        .ok()
+        .filter(|defs| files > 0 && !defs.is_empty())?;
+    render_calls(store, root, &defs, GRAPH_BUDGET).ok()
 }
 
 #[cfg(test)]
@@ -371,5 +382,82 @@ mod tests {
     fn malformed_ranges_are_dropped() {
         assert_eq!(span(&[1, 2]), None);
         assert_eq!(span(&[-1, 0, 3]), None);
+    }
+
+    const FIXTURE: &str = "fn callee() {}\nfn caller() { callee(); }\n";
+
+    fn fixture_index() -> Index {
+        let mut index = Index::new();
+        let mut document = Document::new();
+        document.relative_path = "lib.rs".into();
+        for (name, line, col, enclosing, role) in [
+            ("callee", 0, 3, vec![0, 0, 0, 14], 1),
+            ("caller", 1, 3, vec![1, 0, 1, 26], 1),
+            ("callee", 1, 14, vec![], 0),
+        ] {
+            let mut occurrence = Occurrence::new();
+            occurrence.range = vec![line, col, col + 6];
+            occurrence.symbol = format!("rust-analyzer cargo fixture 0.1.0 {name}().");
+            occurrence.symbol_roles = role;
+            occurrence.enclosing_range = enclosing;
+            document.occurrences.push(occurrence);
+        }
+        for name in ["callee", "caller"] {
+            let mut info = SymbolInformation::new();
+            info.symbol = format!("rust-analyzer cargo fixture 0.1.0 {name}().");
+            info.display_name = name.into();
+            info.kind = scip::types::symbol_information::Kind::Function.into();
+            document.symbols.push(info);
+        }
+        index.documents = vec![document];
+        index
+    }
+
+    fn loaded_fixture() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().expect("scratch dir for the fixture crate");
+        std::fs::write(dir.path().join("lib.rs"), FIXTURE).expect("write fixture source");
+        let index_path = dir.path().join("index.scip");
+        std::fs::write(
+            &index_path,
+            fixture_index().write_to_bytes().expect("serialize"),
+        )
+        .expect("write index");
+        let config = crate::store::StoreConfig {
+            dir: dir.path().join("shard"),
+            model_id: "test-model".into(),
+        };
+        let mut store = Store::open(&config).expect("open writer");
+        load_file(&mut store, dir.path(), &index_path).expect("load fixture index");
+        (dir, store)
+    }
+
+    #[test]
+    fn graph_of_an_unchanged_file_is_tagged_resolved_fresh() {
+        let (dir, store) = loaded_fixture();
+        let text =
+            scip_graph(&store, dir.path(), "callee").expect("scip rows exist for the target");
+        assert!(text.contains("callee lib.rs:1 resolved-fresh"), "{text}");
+        assert!(
+            text.contains("caller caller lib.rs:2 resolved-fresh"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn graph_of_an_edited_file_is_tagged_resolved_stale() {
+        let (dir, store) = loaded_fixture();
+        std::fs::write(dir.path().join("lib.rs"), format!("// edited\n{FIXTURE}"))
+            .expect("edit source");
+        let text =
+            scip_graph(&store, dir.path(), "callee").expect("scip rows exist for the target");
+        assert!(text.contains("resolved-stale"), "{text}");
+        assert!(!text.contains("resolved-fresh"), "{text}");
+    }
+
+    #[test]
+    fn a_file_outside_the_index_is_syntactic_and_unknown_targets_fall_back() {
+        let (dir, store) = loaded_fixture();
+        assert_eq!(freshness(&store, dir.path(), "other.rs"), "syntactic");
+        assert_eq!(scip_graph(&store, dir.path(), "no_such_symbol"), None);
     }
 }
