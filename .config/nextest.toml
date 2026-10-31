@@ -1,3 +1,10 @@
 # every test finishes in seconds; a daemon or client that waits on a peer forever must fail the run, not stall it
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 3 }
+
+[test-groups]
+heavy = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(thirty_two_concurrent_clients_all_get_hits_while_a_reindex_runs) or test(real_fastembed_model_ranks_the_walker_above_unrelated_code) or test(real_model_puts_the_walker_chunk_in_the_top_three_for_the_gitignore_query)'
+test-group = 'heavy'
