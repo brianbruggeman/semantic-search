@@ -77,7 +77,7 @@ fn scan(
     prefix: &str,
     (limit, boost): (usize, bool),
 ) -> Result<Vec<Hit>, IndexError> {
-    let store = Store::open(config)?;
+    let store = Store::open_reader(config)?;
     let _snapshot = store.read_snapshot()?;
     render_hits(
         &store,
@@ -157,7 +157,7 @@ fn gather(
     prefix: &str,
     (limit, boost): (usize, bool),
 ) -> Result<Findings, IndexError> {
-    let store = Store::open(config)?;
+    let store = Store::open_reader(config)?;
     let _snapshot = store.read_snapshot()?;
     let mut facets = Vec::new();
     for facet in prepared {
@@ -197,7 +197,7 @@ pub async fn graph_reply(
     let (config, root) = (Arc::clone(&shard.config), shard.root.clone());
     let (prefix, target) = (scope_prefix(scope, &root), target.to_owned());
     tokio::task::spawn_blocking(move || {
-        let store = Store::open(&config)?;
+        let store = Store::open_reader(&config)?;
         let _snapshot = store.read_snapshot()?;
         let found = context::resolve_target(&store, &root, &prefix, &target)?;
         let more = found.len().saturating_sub(context::LIST_CAP);

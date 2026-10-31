@@ -44,7 +44,7 @@ pub enum ServeError {
 impl ServeError {
     fn kind(&self) -> ErrorKind {
         match self {
-            Self::NotIndexed(_) => ErrorKind::NotIndexed,
+            Self::NotIndexed(_) | Self::Index(IndexError::NotIndexed(_)) => ErrorKind::NotIndexed,
             Self::BadRequest(_) => ErrorKind::BadRequest,
             Self::Index(_) | Self::State(_) => ErrorKind::Internal,
         }

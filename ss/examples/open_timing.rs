@@ -19,9 +19,9 @@ use ss::graph::FileGraph;
 use ss::store::{FileRow, SCHEMA, Store, StoreConfig};
 
 const MODEL: &str = "feature-hash-256";
-const STEPS: [&str; 6] = ["conn_open", "pragma_busy_sync", "wal", "schema", "pin_model", "open_total"];
+const STEPS: [&str; 7] = ["conn_open", "pragma_busy_sync", "wal", "schema", "pin_model", "open_total", "reader_total"];
 
-type Row = [(f64, f64); 6];
+type Row = [(f64, f64); 7];
 
 fn thread_cpu() -> Duration {
     let mut spec = libc::timespec { tv_sec: 0, tv_nsec: 0 };
@@ -67,7 +67,7 @@ fn build(dir: &Path, copies: usize) {
 }
 
 fn one_open(dir: &Path) -> Row {
-    let mut row = [(0.0, 0.0); 6];
+    let mut row = [(0.0, 0.0); 7];
     let (conn, timing) = timed(|| Connection::open(dir.join("index.db")).expect("conn"));
     row[0] = timing;
     row[1] = timed(|| conn.execute_batch("PRAGMA busy_timeout=10000; PRAGMA synchronous=NORMAL;").expect("pragma")).1;
@@ -81,6 +81,9 @@ fn one_open(dir: &Path) -> Row {
     let (store, timing) = timed(|| Store::open(&config(dir)).expect("open"));
     row[5] = timing;
     drop(store);
+    let (reader, timing) = timed(|| Store::open_reader(&config(dir)).expect("reader"));
+    row[6] = timing;
+    drop(reader);
     row
 }
 

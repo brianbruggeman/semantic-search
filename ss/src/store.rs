@@ -5,7 +5,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use proxima::telemetry::debug;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::chunk::{ChunkKey, RawChunk};
 use crate::error::IndexError;
@@ -43,6 +43,7 @@ END;
 /// Bumped whenever the graph tables change shape or meaning; part of the pinned store identity.
 pub const GRAPH_VERSION: u32 = 1;
 const BUILD_ATTEMPTS: usize = 3;
+const BUSY_TIMEOUT: Duration = Duration::from_millis(10_000);
 const WAL_ATTEMPTS: u32 = 200;
 const WAL_RETRY_PAUSE: Duration = Duration::from_millis(5);
 
@@ -90,8 +91,37 @@ impl Store {
         Ok(store)
     }
 
+    /// Opens an existing shard for reading only: no WAL switch, schema batch or model pin, so a query does no
+    /// write-side setup. One `meta` read verifies the shard is indexed under `config.model_id`.
+    #[proxima::instrument]
+    pub fn open_reader(config: &StoreConfig) -> Result<Self, IndexError> {
+        let missing = || IndexError::NotIndexed(config.dir.display().to_string());
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
+        let conn = Connection::open_with_flags(config.dir.join("index.db"), flags)
+            .map_err(|error| if is_code(&error, ErrorCode::CannotOpen) { missing() } else { error.into() })?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        let pinned = pinned_identity(&config.model_id);
+        let current: Option<String> = conn
+            .query_row("SELECT v FROM meta WHERE k='model'", [], |row| row.get(0))
+            .optional()
+            .or_else(|error| if is_no_table(&error) { Ok(None) } else { Err(error) })?;
+        match current {
+            None => Err(missing()),
+            Some(found) if found != pinned => Err(IndexError::IdentityMismatch {
+                found,
+                expected: pinned,
+            }),
+            Some(_) => Ok(Self {
+                conn,
+                dir: config.dir.clone(),
+            }),
+        }
+    }
+
     fn pin_model(&self, model_id: &str) -> rusqlite::Result<()> {
-        let pinned = format!("{model_id}+graph{GRAPH_VERSION}");
+        let pinned = pinned_identity(model_id);
         let current: Option<String> = self
             .conn
             .query_row("SELECT v FROM meta WHERE k='model'", [], |row| row.get(0))
@@ -379,6 +409,19 @@ impl Store {
             )
             .optional()
     }
+}
+
+fn pinned_identity(model_id: &str) -> String {
+    format!("{model_id}+graph{GRAPH_VERSION}")
+}
+
+fn is_code(error: &rusqlite::Error, code: ErrorCode) -> bool {
+    matches!(error, rusqlite::Error::SqliteFailure(failure, _) if failure.code == code)
+}
+
+fn is_no_table(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::SqliteFailure(failure, Some(message))
+        if failure.code == ErrorCode::Unknown && message.starts_with("no such table"))
 }
 
 /// Switching a fresh database to WAL can fail with `busy` while another connection does the same, and sqlite does not

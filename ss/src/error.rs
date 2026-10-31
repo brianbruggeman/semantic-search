@@ -6,6 +6,10 @@ pub enum IndexError {
     Io(#[from] std::io::Error),
     #[error("store failure: {0}")]
     Store(#[from] rusqlite::Error),
+    #[error("{0} is not indexed; run `ss index <path>` first")]
+    NotIndexed(String),
+    #[error("shard is pinned to {found} but this build expects {expected}; reindex")]
+    IdentityMismatch { found: String, expected: String },
     #[error("embedding failure: {0}")]
     Embed(#[from] EmbedError),
     #[error("blocking task failed: {0}")]
