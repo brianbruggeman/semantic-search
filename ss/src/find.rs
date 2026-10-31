@@ -408,3 +408,6 @@ pub fn render_json(found: &Found) -> String {
     let next = next_line(found).map(|line| line.trim_start_matches("next: ").trim().to_owned());
     json!({"shape": found.shape.as_str(), "query": found.query, "found": {"files": found.files, "matches": found.matches, "definitions": found.definitions}, "files": files, "cut": found.beyond, "notes": found.notes, "next": next, "outline": found.body}).to_string()
 }
+
+#[cfg(test)]
+mod tests;
