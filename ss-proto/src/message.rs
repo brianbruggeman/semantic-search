@@ -90,16 +90,14 @@ pub struct DaemonStatus {
     pub warm: bool,
 }
 
-/// Totals since the daemon started, except `rebuilds_in_flight` and `max_in_flight` which are a gauge and its high-water mark.
+/// `hits` and `compactions` are totals since the daemon started; `segments` and `tombstones` are live gauges.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VectorCacheStatus {
     pub hits: u64,
-    pub rebuilds_started: u64,
-    pub rebuilds_published: u64,
-    pub rebuilds_in_flight: u64,
-    pub max_in_flight: u64,
     #[serde(default)]
-    pub served_stale: u64,
+    pub segments: u64,
     #[serde(default)]
-    pub waited_on_build: u64,
+    pub tombstones: u64,
+    #[serde(default)]
+    pub compactions: u64,
 }

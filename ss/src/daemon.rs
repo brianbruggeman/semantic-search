@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::store::vector_cache;
+use crate::store::{Store, vector_cache};
 use proxima::pipe::{Admission, DropReason, FailMode, Pipe, SinkFront};
 use proxima::telemetry::{info, warn};
 use ss_ipc::{InstanceLock, ListenerExt as _, Stream, listen};
@@ -86,7 +86,7 @@ pub struct Core {
 impl Core {
     fn new(settings: Settings, pool: EmbedPool, registry: Registry) -> Self {
         vector_cache::set_limit_mb(settings.vector_cache_mb);
-        vector_cache::set_stale_ms(settings.vector_cache_stale_ms);
+        vector_cache::set_max_segments(settings.vector_segments_max);
         Self {
             settings,
             hub: WatchHub::default(),
@@ -116,6 +116,12 @@ impl Core {
         let settings = &self.settings;
         let pool = &self.pool;
         Arc::clone(shards.entry(root.to_path_buf()).or_insert_with(|| {
+            let config = settings.store_config(root);
+            std::thread::spawn(move || {
+                if let Ok(store) = Store::open(&config) {
+                    let _ = store.load_segments();
+                }
+            });
             Arc::new(Entry {
                 shard: Shard::new(root, settings.store_config(root), pool)
                     .with_graph_boost(settings.graph_boost),
@@ -224,12 +230,9 @@ impl Core {
                 let counters = vector_cache::counters();
                 VectorCacheStatus {
                     hits: counters.hits,
-                    rebuilds_started: counters.started,
-                    rebuilds_published: counters.published,
-                    rebuilds_in_flight: counters.in_flight,
-                    max_in_flight: counters.max_in_flight,
-                    served_stale: counters.served_stale,
-                    waited_on_build: counters.waited_on_build,
+                    segments: counters.segments,
+                    tombstones: counters.tombstones,
+                    compactions: counters.compactions,
                 }
             },
             warm: self.pool.is_warm(),

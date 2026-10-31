@@ -121,14 +121,8 @@ fn print_status(status: &DaemonStatus) {
     );
     let cache = &status.vector_cache;
     println!(
-        "vector cache: hits={} rebuilds_started={} rebuilds_published={} in_flight={} max_in_flight={} served_stale={} waited_on_build={}",
-        cache.hits,
-        cache.rebuilds_started,
-        cache.rebuilds_published,
-        cache.rebuilds_in_flight,
-        cache.max_in_flight,
-        cache.served_stale,
-        cache.waited_on_build
+        "vector cache: hits={} segments={} tombstones={} compactions={}",
+        cache.hits, cache.segments, cache.tombstones, cache.compactions
     );
 }
 

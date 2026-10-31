@@ -9,7 +9,6 @@ use ss_proto::IndexStats;
 use crate::embed::EmbedPool;
 use crate::error::IndexError;
 use crate::pipeline::{FilePipeline, file_pipeline};
-use crate::store::vector_cache::IndexRun;
 use crate::store::{Store, StoreConfig};
 use crate::walk::Walk;
 
@@ -59,7 +58,6 @@ impl Shard {
 
 #[proxima::instrument]
 pub async fn index_tree(shard: &Shard, scope: &Path) -> Result<IndexStats, IndexError> {
-    let _run = IndexRun::begin();
     let config = Arc::clone(&shard.config);
     let root = shard.root.clone();
     tokio::task::spawn_blocking(move || {
@@ -80,7 +78,6 @@ pub async fn index_tree(shard: &Shard, scope: &Path) -> Result<IndexStats, Index
 /// longer exist (a file or a whole directory) are dropped from the store.
 #[proxima::instrument]
 pub async fn index_changed(shard: &Shard, paths: Vec<PathBuf>) -> Result<IndexStats, IndexError> {
-    let _run = IndexRun::begin();
     let (present, gone): (Vec<PathBuf>, Vec<PathBuf>) =
         paths.into_iter().partition(|path| path.exists());
     let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) =
