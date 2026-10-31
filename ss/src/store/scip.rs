@@ -86,6 +86,9 @@ const DEF_SELECT: &str = "SELECT s.id, s.display_name, s.kind, o.file, o.start_l
      COALESCE(o.enclosing_start, o.start_line), COALESCE(o.enclosing_end, o.end_line) \
      FROM scip_occurrences o JOIN scip_symbols s ON s.id = o.symbol_id WHERE o.role & 1 = 1 AND s.symbol NOT LIKE 'local %'";
 
+/// Kinds that run code. rust-analyzer labels an associated function without `self` (`Walk::new`) `StaticMethod`.
+const CALLABLE_KINDS: &str = "'Function','Method','StaticMethod','Constructor'";
+
 fn def_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DefRow> {
     Ok(DefRow {
         symbol_id: row.get(0)?,
@@ -143,7 +146,7 @@ impl Store {
     pub fn scip_enclosing(&self, file: &str, line: u32) -> rusqlite::Result<Option<DefRow>> {
         let sql = format!(
             "{DEF_SELECT} AND o.file=?1 AND o.enclosing_start <= ?2 AND o.enclosing_end >= ?2 \
-             AND s.kind IN ('Function','Method','Constructor','Struct','Enum','Trait','Impl') \
+             AND s.kind IN ({CALLABLE_KINDS},'Struct','Enum','Trait','Impl') \
              ORDER BY o.enclosing_end - o.enclosing_start LIMIT 1"
         );
         let mut statement = self.conn.prepare_cached(&sql)?;
@@ -168,7 +171,7 @@ impl Store {
         let mut callees = Vec::new();
         for (line, symbol_id) in hits {
             let sql = format!(
-                "{DEF_SELECT} AND s.id = ?1 AND s.kind IN ('Function','Method','Constructor') LIMIT 1"
+                "{DEF_SELECT} AND s.id = ?1 AND s.kind IN ({CALLABLE_KINDS}) LIMIT 1"
             );
             let mut lookup = self.conn.prepare_cached(&sql)?;
             if let Some(target) = lookup.query_map([symbol_id], def_row)?.next().transpose()? {
@@ -259,6 +262,47 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn associated_functions_without_self_are_callees_and_owners() {
+        let dir = tempfile::tempdir().expect("scratch dir for the store");
+        let config = StoreConfig { dir: dir.path().to_path_buf(), model_id: "test-model".into() };
+        let mut store = Store::open(&config).expect("open writer");
+        let mut rows = ScipRows { files: vec!["lib.rs".into()], ..ScipRows::default() };
+        let site = |symbol: &str, line: u32, role: i32, enclosing: Option<(u32, u32)>| OccurrenceRow {
+            file: "lib.rs".into(),
+            start_line: line,
+            start_col: 4,
+            end_line: line,
+            end_col: 8,
+            symbol: symbol.into(),
+            role,
+            enclosing,
+        };
+        for (symbol, name, kind) in [
+            ("ss impl#[Walk]new().", "new", "StaticMethod"),
+            ("ss impl#[Walk]run().", "run", "Method"),
+            ("ss top().", "top", "Function"),
+        ] {
+            let signature_doc = format!("pub fn {name}()");
+            rows.symbols.push(SymbolRow { symbol: symbol.into(), display_name: name.into(), kind: kind.into(), signature_doc });
+        }
+        rows.occurrences = vec![
+            site("ss impl#[Walk]new().", 1, 1, Some((1, 1))),
+            site("ss impl#[Walk]run().", 2, 1, Some((2, 2))),
+            site("ss top().", 4, 1, Some((4, 7))),
+            site("ss impl#[Walk]new().", 5, 0, None),
+            site("ss impl#[Walk]run().", 5, 0, None),
+        ];
+        store.load_scip(&rows, &HashMap::new()).expect("load");
+
+        let top = store.scip_defs_named("top").expect("top def").remove(0);
+        let names: Vec<String> = store.scip_callees(&top).expect("callees").into_iter().map(|(_, def)| def.name).collect();
+
+        assert_eq!(names, vec!["new".to_string(), "run".to_string()]);
+        let owner = store.scip_enclosing("lib.rs", 1).expect("enclosing").expect("new spans line 1");
+        assert_eq!(owner.name, "new");
     }
 
     #[test]
