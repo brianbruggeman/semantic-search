@@ -329,7 +329,14 @@ fn a_big_context_request_keeps_whole_blocks_and_counts_the_cut_ones() {
 #[test]
 fn short_help_still_prints_help_outside_exact_mode() {
     let dir = tempfile::tempdir().expect("tempdir");
-    for args in [vec!["-h"], vec!["graph", "-h"], vec!["index", "-h"]] {
+    let cases = [
+        vec!["-h"],
+        vec!["graph", "-h"],
+        vec!["index", "-h"],
+        vec!["show", "-h"],
+        vec!["diff", "-h"],
+    ];
+    for args in cases {
         let out =
             String::from_utf8(run(env!("CARGO_BIN_EXE_ss"), &args, dir.path())).expect("utf8");
         assert!(out.contains("Usage"), "{args:?}: {out}");
