@@ -29,7 +29,7 @@ fn map_prints_directory_lines_coverage_and_a_cut_line_under_a_tiny_budget() {
     let (ok, out) = run(&["map", ".", "--budget", "60"], dir.path());
 
     assert!(ok, "{out}");
-    assert!(out.contains("/ (2 files,"), "{out}");
+    assert!(out.contains("/  2 files  ~"), "{out}");
     assert!(out.contains("cut: "), "{out}");
     assert!(out.ends_with("purpose coverage: 12 of 24 files have one (50%)\n"), "{out}");
 }
