@@ -12,7 +12,9 @@ use ss::render::{
     COMPACT_BUDGET, Compact, Layout, Mode, compact_text, exact_reply, facets, findings_json,
     findings_text, graph_json, graph_text, lines_text,
 };
+use ss::scip::load_file;
 use ss::settings::Settings;
+use ss::store::Store;
 use ss_proto::{Hit, Request, Response};
 
 const EXIT_HITS: u8 = 0;
@@ -167,6 +169,11 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         context: usize,
     },
+    /// Compiler-resolved definitions and references from a SCIP index
+    Scip {
+        #[command(subcommand)]
+        action: ScipAction,
+    },
     /// Index a directory (created as a root on first use) and wait for it to finish
     Index { path: PathBuf },
     /// Show the neighbourhood of a symbol name or path:line: members, callers, callees, importers, tests
@@ -182,6 +189,17 @@ enum Command {
         /// Directory or file to search under (default: the current directory)
         #[arg(long)]
         path: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ScipAction {
+    /// Load an index.scip (for example from `rust-analyzer scip`) into the root's store
+    Load {
+        index: PathBuf,
+        /// Root the index was generated for (default: the current directory)
+        #[arg(long)]
+        root: Option<PathBuf>,
     },
 }
 
@@ -240,12 +258,15 @@ async fn main() -> ExitCode {
         }
         _ => {}
     }
+    if let Some(Command::Scip { action: ScipAction::Load { index, root } }) = &cli.command {
+        return run_scip_load(index, root.as_deref());
+    }
     let client = match Settings::load() {
         Ok(settings) => Client::new(settings),
         Err(error) => return fail(&format!("bad SS_* configuration: {error}")),
     };
     let outcome = match cli.command {
-        Some(Command::Show { .. } | Command::Diff { .. } | Command::Outline { .. } | Command::Section { .. }) => {
+        Some(Command::Show { .. } | Command::Diff { .. } | Command::Outline { .. } | Command::Section { .. } | Command::Scip { .. }) => {
             unreachable_history()
         }
         Some(Command::Index { path }) => run_index(&client, &path).await,
@@ -258,6 +279,23 @@ async fn main() -> ExitCode {
         None => run_search(&client, &cli).await,
     };
     outcome.unwrap_or_else(|message| fail(&message))
+}
+
+fn run_scip_load(index: &Path, root: Option<&Path>) -> ExitCode {
+    let outcome = (|| -> Result<(u64, u64, u64), String> {
+        let here = std::env::current_dir().map_err(|error| error.to_string())?;
+        let root = PathBuf::from(absolute(root.unwrap_or(&here))?);
+        let settings = Settings::load().map_err(|error| error.to_string())?;
+        let mut store = Store::open(&settings.store_config(&root)).map_err(|error| error.to_string())?;
+        load_file(&mut store, &root, index).map_err(|error| error.to_string())
+    })();
+    match outcome {
+        Ok((symbols, occurrences, files)) => {
+            println!("loaded scip: {symbols} symbols, {occurrences} occurrences, {files} files");
+            ExitCode::from(EXIT_HITS)
+        }
+        Err(message) => fail(&message),
+    }
 }
 
 fn unreachable_history() -> Result<ExitCode, String> {

@@ -15,6 +15,7 @@ pub mod query;
 pub mod read;
 pub mod registry;
 pub mod render;
+pub mod scip;
 pub mod settings;
 pub mod store;
 pub mod telemetry;

@@ -14,6 +14,7 @@ use crate::graph::{FileGraph, GraphEdge, GraphNode};
 use vector_cache::Segment;
 
 mod graph_read;
+mod scip;
 pub mod vector_cache;
 
 pub use graph_read::{EdgeRow, NodeRow};
@@ -32,6 +33,11 @@ CREATE INDEX IF NOT EXISTS nodes_chunk ON nodes(chunk_key);
 CREATE TABLE IF NOT EXISTS edges(id INTEGER PRIMARY KEY, file TEXT NOT NULL, kind TEXT NOT NULL, src TEXT NOT NULL, dst TEXT NOT NULL, qual TEXT NOT NULL, line INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS edges_file ON edges(file, src);
 CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst);
+CREATE TABLE IF NOT EXISTS scip_symbols(id INTEGER PRIMARY KEY, symbol TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, kind TEXT NOT NULL, signature_doc TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS scip_occurrences(id INTEGER PRIMARY KEY, file TEXT NOT NULL, start_line INTEGER NOT NULL, start_col INTEGER NOT NULL, end_line INTEGER NOT NULL, end_col INTEGER NOT NULL, symbol_id INTEGER NOT NULL, role INTEGER NOT NULL, enclosing_start INTEGER, enclosing_end INTEGER);
+CREATE INDEX IF NOT EXISTS scip_occ_file ON scip_occurrences(file, start_line);
+CREATE INDEX IF NOT EXISTS scip_occ_symbol ON scip_occurrences(symbol_id);
+CREATE TABLE IF NOT EXISTS scip_files(file TEXT PRIMARY KEY, content_hash BLOB NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, path, content='chunks', content_rowid='id');
 CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
   INSERT INTO chunks_fts(rowid, text, path) VALUES (new.id, new.text, new.path);
@@ -143,7 +149,7 @@ impl Store {
         }
         self.conn
             .execute_batch(
-            "DELETE FROM vectors; DELETE FROM chunks; DELETE FROM files; DELETE FROM nodes; DELETE FROM edges;",
+            "DELETE FROM vectors; DELETE FROM chunks; DELETE FROM files; DELETE FROM nodes; DELETE FROM edges; DELETE FROM scip_symbols; DELETE FROM scip_occurrences; DELETE FROM scip_files;",
         )?;
         vector_cache::evict(&self.dir);
         self.conn.execute(
@@ -266,6 +272,8 @@ impl Store {
         tx.execute("DELETE FROM files WHERE path=?1", [path])?;
         tx.execute("DELETE FROM nodes WHERE file=?1", [path])?;
         tx.execute("DELETE FROM edges WHERE file=?1", [path])?;
+        tx.execute("DELETE FROM scip_occurrences WHERE file=?1", [path])?;
+        tx.execute("DELETE FROM scip_files WHERE file=?1", [path])?;
         tx.commit()?;
         if vector_cache::active(&self.dir) {
             self.publish(&replaced, Some(Segment::new(0)));
