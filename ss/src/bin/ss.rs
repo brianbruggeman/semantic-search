@@ -29,13 +29,13 @@ Usage: ss [OPTIONS] <QUERY>... | ss <COMMAND>
   ss QUERY...        semantic search; --exact regex
   ss find QUERY  one call
   ss outline FILE    symbols with line ranges
-  ss section FILE N  one symbol body (or --line N)
+  ss section FILE N  one symbol body
   ss graph SYMBOL    callers, callees, members
-  ss def|refs SYM    scip definition, references
+  ss def|refs SYM    scip defs, refs
   ss scip load FILE  load a scip index
-  ss show REV|diff   symbol-level changes
+  ss show REV|diff   symbol changes
   ss map [DIR]       file purposes
-  ss index PATH      index a directory
+  ss index PATH      index a dir
   ss --help          all options
 ";
 
