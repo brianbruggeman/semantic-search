@@ -251,3 +251,34 @@ fn the_outline_of_a_large_doc_is_smaller_than_the_doc() {
     assert!(!out.is_empty() && out.len() * 4 < doc.len(), "{} vs {}", out.len(), doc.len());
     assert!(out.chars().count() <= 400 * 4, "{}", out.chars().count());
 }
+
+#[test]
+fn a_line_in_the_doc_comment_above_a_symbol_selects_that_symbol() {
+    let dir = tree();
+
+    let out = stdout(&["section", "counter.rs", "--line", "3"], dir.path());
+
+    assert!(out.starts_with("counter.rs:4-6 fn pub fn add"), "{out}");
+}
+
+#[test]
+fn a_line_in_the_attributes_above_a_method_selects_the_method() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "struct Gate;\n\nimpl Gate {\n    /// Opens.\n    #[must_use]\n    pub fn open(&self) -> bool {\n        true\n    }\n}\n";
+    fs::write(dir.path().join("gate.rs"), source).expect("write");
+
+    let out = stdout(&["section", "gate.rs", "--line", "5"], dir.path());
+
+    assert!(out.starts_with("gate.rs:6-8 method [Gate] pub fn open"), "{out}");
+}
+
+#[test]
+fn a_line_past_a_blank_gap_after_code_still_fails_as_outside() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "pub fn first() -> u8 {\n    1\n}\n\nconst BETWEEN: u8 = 2 + 3;\n\npub fn second() -> u8 {\n    2\n}\n";
+    fs::write(dir.path().join("gap.rs"), source).expect("write");
+
+    let out = ss(&["section", "gap.rs", "--line", "4"], dir.path());
+
+    assert!(!out.status.success(), "a blank line after a body must not leak into the next symbol");
+}
