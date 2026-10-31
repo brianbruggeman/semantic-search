@@ -131,3 +131,63 @@ fn two_definitions_of_one_name_are_ambiguous() {
     let text = render_text(&find(dir.path(), "list_files", &[]).expect("find"), FIND_BUDGET);
     assert!(text.contains("definition: ambiguous (2)"), "{text}");
 }
+
+const REVIEW: &str = "# independent review of actors-draft\n\n- improvements/queue/ holds the improvement queue; queue/003 says the rule sits outside the load-out.\n- the queue status is unclear, and the personas used in trials were never listed.\n- the reviewer hands work back to the orchestrator; the reviewer.md tools are Read, Grep, Glob, Bash.\n";
+const ANSWER: &str = "# orchestrator answer\n\nfirst item into the improvement queue, status: nothing is ready to accept yet. the reviewer and the personas in trials agree.\n";
+
+fn actors_dir() -> TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for sub in ["trial", "improvements/queue", "personas"] {
+        fs::create_dir_all(dir.path().join(sub)).expect("mkdir");
+    }
+    fs::write(dir.path().join("trial/independent-review.md"), REVIEW).expect("write");
+    for index in 0..12 {
+        fs::write(dir.path().join(format!("trial/m-{index}.md")), ANSWER).expect("write");
+    }
+    fs::write(dir.path().join("improvements/queue/001-acceptance-proxy.md"), "# acceptance proxy\n\nstatus: open. the card acceptance checked too little.\n").expect("write");
+    fs::write(dir.path().join("personas/candid.md"), "# candid\n\nsay the finding plainly.\n").expect("write");
+    fs::write(dir.path().join("personas/calm.md"), "# calm\n\nno alarm in the tone.\n").expect("write");
+    fs::write(dir.path().join("reviewer.md"), "# reviewer\n\nread the card and write one proposal file.\n").expect("write");
+    fs::write(dir.path().join("README.md"), "# actors draft\n\nactors, personas and trials.\n").expect("write");
+    dir
+}
+
+fn top(dir: &TempDir, query: &str, count: usize) -> Vec<String> {
+    find(dir.path(), query, &[]).expect("find").hits.into_iter().take(count).map(|hit| hit.path).collect()
+}
+
+#[test]
+fn a_directory_term_in_the_query_ranks_its_owner_above_files_that_quote_it() {
+    let dir = actors_dir();
+    let queue = top(&dir, "what does the improvement queue contain and what is its status", 3);
+    assert_eq!(queue[0], "improvements/queue/001-acceptance-proxy.md", "{queue:?}");
+}
+
+#[test]
+fn a_personas_directory_surfaces_even_when_no_file_says_the_word_in_full() {
+    let dir = actors_dir();
+    let personas = top(&dir, "what personas exist and which are used in trials", 5);
+    assert!(personas.iter().any(|path| path.starts_with("personas/")), "{personas:?}");
+}
+
+#[test]
+fn a_file_named_for_a_query_term_makes_the_top_three() {
+    let dir = actors_dir();
+    let handoff = top(&dir, "how do the reviewer and writer hand work to each other", 3);
+    assert!(handoff.contains(&"reviewer.md".to_owned()), "{handoff:?}");
+}
+
+#[test]
+fn a_term_naming_most_of_the_tree_is_not_a_path_signal() {
+    let files: Vec<String> = ["trial/a.md", "trial/b.md", "trial/c.md", "trial/d.md", "personas/candid.md", "reviewer.md"].map(str::to_owned).to_vec();
+    let terms: Vec<String> = ["trials", "personas", "reviewer"].map(str::to_owned).to_vec();
+    assert_eq!(super::path_terms(&files, &terms), ["personas", "reviewer"]);
+}
+
+#[test]
+fn a_path_part_must_be_close_to_the_term_not_a_short_prefix_of_it() {
+    let dir = actors_dir();
+    fs::write(dir.path().join("orch-C2.md"), "# run\n\nnothing relevant.\n").expect("write");
+    let phrase = top(&dir, "orchestrator hand work", 5);
+    assert!(!phrase.contains(&"orch-C2.md".to_owned()), "{phrase:?}");
+}

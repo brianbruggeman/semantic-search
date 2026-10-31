@@ -23,6 +23,10 @@ pub const MAX_FILES: usize = 5;
 /// Lines or symbols shown per file at most.
 pub const MAX_LINES: usize = 3;
 const RRF_K: f64 = 60.0;
+const PATH_WEIGHT: usize = 3;
+const PATH_MIN: usize = 4;
+const PATH_SUFFIX: usize = 3;
+const PATH_SHARE_DIV: usize = 4;
 const PURPOSE_SCAN: usize = 30;
 const GRAPH_LINES: usize = 6;
 const EXTENSIONS: [&str; 16] = [
@@ -96,6 +100,7 @@ impl Found {
 
 struct Cand {
     path: String,
+    named: usize,
     score: usize,
     total: usize,
     range: Option<(usize, usize)>,
@@ -143,7 +148,7 @@ fn relative(root: &Path, path: &str) -> String {
 
 fn cand_of(root: &Path, matches: &FileMatches, tag: &'static str) -> Cand {
     let range = matches.lines.first().zip(matches.lines.last()).map(|(first, last)| (first.0, last.0));
-    Cand { path: relative(root, &matches.path), score: 1, total: matches.total, range, lines: matches.lines.clone(), tags: vec![tag] }
+    Cand { path: relative(root, &matches.path), named: 0, score: 1, total: matches.total, range, lines: matches.lines.clone(), tags: vec![tag] }
 }
 
 fn by_total(mut cands: Vec<Cand>) -> Vec<Cand> {
@@ -204,8 +209,34 @@ fn split_words(token: &str) -> Vec<String> {
     spaced.split_whitespace().map(str::to_lowercase).collect()
 }
 
-fn term_scan_file(root: &Path, path: &Path, terms: &[String]) -> Option<Cand> {
-    let text = read_text(path)?;
+fn path_parts(rel: &str) -> Vec<String> {
+    let lower = rel.to_lowercase();
+    lower.split(|letter: char| !letter.is_ascii_alphanumeric()).filter(|part| part.len() >= PATH_MIN).map(str::to_owned).collect()
+}
+
+/// Prefix in either direction within a few letters, so `personas` meets `persona` but `orchestrator` does not meet `orch`.
+fn names_part(term: &str, parts: &[String]) -> bool {
+    let close = |part: &str| part.len().abs_diff(term.len()) <= PATH_SUFFIX && (part.starts_with(term) || term.starts_with(part));
+    term.len() >= PATH_MIN && parts.iter().any(|part| close(part))
+}
+
+/// Terms that name a path component of at most a quarter of the files: `queue` or `personas` point at an owner,
+/// `trial` in a corpus that is mostly `trial/` points at everything and so at nothing.
+fn path_terms(files: &[String], terms: &[String]) -> Vec<String> {
+    let parts: Vec<Vec<String>> = files.iter().map(|rel| path_parts(rel)).collect();
+    let limit = (files.len() / PATH_SHARE_DIV).max(1);
+    terms.iter().filter(|term| parts.iter().filter(|found| names_part(term, found)).count() <= limit).cloned().collect()
+}
+
+fn term_scan_file(root: &Path, path: &Path, terms: &[String], named_terms: &[String]) -> Option<Cand> {
+    let rel = relative(root, &path.to_string_lossy());
+    let parts = path_parts(&rel);
+    let named = named_terms.iter().filter(|term| names_part(term, &parts)).count();
+    let text = match read_text(path) {
+        Some(text) => text,
+        None if named > 0 => String::new(),
+        None => return None,
+    };
     let mut seen: BTreeSet<usize> = BTreeSet::new();
     let mut total = 0;
     let mut lines: Vec<(usize, usize, String)> = Vec::new();
@@ -224,14 +255,22 @@ fn term_scan_file(root: &Path, path: &Path, terms: &[String]) -> Option<Cand> {
     lines.sort_by_key(|row| row.1);
     let range = lines.first().zip(lines.last()).map(|(first, last)| (first.1, last.1));
     let kept = lines.into_iter().map(|(_, number, text)| (number, text)).collect();
-    (total > 0).then(|| Cand { path: relative(root, &path.to_string_lossy()), score: seen.len(), total, range, lines: kept, tags: vec!["term-match"] })
+    (total > 0 || named > 0).then(|| Cand { path: rel, named, score: seen.len() + PATH_WEIGHT * named, total, range, lines: kept, tags: vec!["term-match"] })
 }
 
 fn phrase_cands(root: &Path, query: &str, semantic: &[(String, usize, usize)]) -> Vec<Cand> {
     let terms = terms_of(query);
-    let mut cands: Vec<Cand> = list_files(root).iter().filter_map(|path| term_scan_file(root, path, &terms)).collect();
+    let files = list_files(root);
+    let rels: Vec<String> = files.iter().map(|path| relative(root, &path.to_string_lossy())).collect();
+    let named_terms = path_terms(&rels, &terms);
+    let mut cands: Vec<Cand> = files.iter().filter_map(|path| term_scan_file(root, path, &terms, &named_terms)).collect();
     cands.sort_by(|left, right| right.score.cmp(&left.score).then(right.total.cmp(&left.total)).then_with(|| left.path.cmp(&right.path)));
     if semantic.is_empty() { cands } else { fuse(root, cands, semantic) }
+}
+
+/// A path component naming a query term counts as one more list in which the file is first.
+fn named_share(named: usize) -> f64 {
+    f64::from(u32::try_from(named).unwrap_or(u32::MAX)) * rrf_share(0)
 }
 
 fn rrf_share(rank: usize) -> f64 {
@@ -243,7 +282,7 @@ fn fuse(root: &Path, cands: Vec<Cand>, semantic: &[(String, usize, usize)]) -> V
     let mut scores: BTreeMap<String, f64> = BTreeMap::new();
     let mut table: BTreeMap<String, Cand> = BTreeMap::new();
     for (rank, cand) in cands.into_iter().enumerate() {
-        *scores.entry(cand.path.clone()).or_default() += rrf_share(rank);
+        *scores.entry(cand.path.clone()).or_default() += rrf_share(rank) + named_share(cand.named);
         table.insert(cand.path.clone(), cand);
     }
     let mut files: Vec<(String, usize, usize)> = Vec::new();
@@ -255,7 +294,7 @@ fn fuse(root: &Path, cands: Vec<Cand>, semantic: &[(String, usize, usize)]) -> V
     }
     for (rank, (rel, start, end)) in files.into_iter().enumerate() {
         *scores.entry(rel.clone()).or_default() += rrf_share(rank);
-        let entry = table.entry(rel.clone()).or_insert_with(|| Cand { path: rel, score: 0, total: 0, range: Some((start, end)), lines: Vec::new(), tags: Vec::new() });
+        let entry = table.entry(rel.clone()).or_insert_with(|| Cand { path: rel, named: 0, score: 0, total: 0, range: Some((start, end)), lines: Vec::new(), tags: Vec::new() });
         entry.tags.push("semantic");
     }
     let mut ranked: Vec<(String, f64)> = scores.into_iter().collect();
