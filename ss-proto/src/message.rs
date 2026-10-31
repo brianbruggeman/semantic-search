@@ -82,4 +82,17 @@ pub struct DaemonStatus {
     pub chunks_seen: u64,
     pub chunks_embedded: u64,
     pub chunks_skipped: u64,
+    /// Vector-cache counters; absent from older daemons.
+    #[serde(default)]
+    pub vector_cache: VectorCacheStatus,
+}
+
+/// Totals since the daemon started, except `rebuilds_in_flight` and `max_in_flight` which are a gauge and its high-water mark.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VectorCacheStatus {
+    pub hits: u64,
+    pub rebuilds_started: u64,
+    pub rebuilds_published: u64,
+    pub rebuilds_in_flight: u64,
+    pub max_in_flight: u64,
 }

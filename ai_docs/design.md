@@ -175,3 +175,14 @@ Exact search (`ss --exact <regex>`, `ss -F <literal>`): a lexical scan of the fi
 No arm reached 36. The two missing queries are not explained; the arms keep at most 5 entries per edge list like A0, and drop the container and score on every hit and the signature on hits 2 to 5. The post hoc points meet rules 1 and 3 and miss rule 2 by 2 (34 vs 36); they are not claimed as passing.
 - Shipped: `ss --compact [--budget N]` (default 250) is that 250 post hoc point, opt-in; `ss --budget N` keeps trimming the verbose form by hit order; `--full` was not added because the verbose form is still the default.
 - Exact search, 20 patterns of `ss/tests/data/exact_queries.tsv` (9 match > 40 lines in the corpus, 2 match none), default budget 300 (chosen post hoc: no default budget was adopted for the structured form), tokens of stdout: `rg -n --no-heading` median 475 p95 6026 (sum 34088); `ss --exact` default median 285 p95 296 (sum 4485); `--budget 1000` median 384 p95 986. Matching-line counts equal `rg -c` summed over files for 20 of 20 patterns. For the 9 patterns above 40 lines rg median 2883 tokens, ss 295. Every default reply is <= 300 tokens; 12 of 20 carry a `cut:` line (e.g. `fn `: 293 matches, 296 tokens, `cut: 9 files (46 matches), 47 lines (use --budget 600)`). Small answers cost the same or more than rg (`pub fn \w+_files\b` 124 vs 118, `busy_timeout` 33 vs 29) because of the `N matches in F files` line and the `path (N)` header.
+
+## Vector cache version capture: kill criteria (registered before measuring)
+
+An append-only arena plus per-version visibility set replaces the rebuild-per-generation cache only if all hold, measured in release with getrusage CPU time over 1,000 iterations:
+
+1. capturing a version (arena Arc + visibility Arc, everything beyond the scan) is at most 20 us p99
+2. end-to-end vector_search CPU at about 19,000 chunks, during a reindex with 32 clients, is at most 10 ms p99
+3. a write's publish (append rows + build the visibility set) is at most 2 ms per file at 19,000 live rows
+4. visibility set memory is at most 1 bit per row per live version held
+
+If any fails, ship only single-flight rebuild plus the stale bound. No process is spawned on the query path.

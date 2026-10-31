@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use proxima_primitives::sync::blocking::Mutex;
@@ -12,6 +12,51 @@ use proxima_primitives::sync::blocking::Mutex;
 const DEFAULT_LIMIT_MB: usize = 512;
 
 static LIMIT_MB: AtomicUsize = AtomicUsize::new(DEFAULT_LIMIT_MB);
+static HITS: AtomicU64 = AtomicU64::new(0);
+static STARTED: AtomicU64 = AtomicU64::new(0);
+static PUBLISHED: AtomicU64 = AtomicU64::new(0);
+static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+static MAX_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+
+/// Cache activity totals; `in_flight` is rebuilds running now and `max_in_flight` its high-water mark.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counters {
+    pub hits: u64,
+    pub started: u64,
+    pub published: u64,
+    pub in_flight: u64,
+    pub max_in_flight: u64,
+}
+
+#[must_use]
+pub fn counters() -> Counters {
+    Counters {
+        hits: HITS.load(Ordering::Relaxed),
+        started: STARTED.load(Ordering::Relaxed),
+        published: PUBLISHED.load(Ordering::Relaxed),
+        in_flight: IN_FLIGHT.load(Ordering::Relaxed),
+        max_in_flight: MAX_IN_FLIGHT.load(Ordering::Relaxed),
+    }
+}
+
+/// Marks a rebuild running until dropped, so every exit path decrements the gauge.
+pub(super) struct RebuildGuard;
+
+impl RebuildGuard {
+    pub(super) fn begin() -> Self {
+        STARTED.fetch_add(1, Ordering::Relaxed);
+        let now = IN_FLIGHT.fetch_add(1, Ordering::Relaxed) + 1;
+        MAX_IN_FLIGHT.fetch_max(now, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for RebuildGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 // a blocking mutex outside async, held only for an Arc clone or insert, never across a scan or a rebuild
 static SHARDS: LazyLock<Mutex<HashMap<PathBuf, Arc<VectorSnapshot>>>> =
     LazyLock::new(Mutex::default);
@@ -74,7 +119,15 @@ impl VectorSnapshot {
             .zip(&self.paths)
             .zip(self.matrix.chunks_exact(self.dim.max(1)))
             .filter(|((_, path), _)| path.starts_with(prefix))
-            .map(|((id, _), row)| (*id, row.iter().zip(query).map(|(left, right)| left * right).sum()))
+            .map(|((id, _), row)| {
+                (
+                    *id,
+                    row.iter()
+                        .zip(query)
+                        .map(|(left, right)| left * right)
+                        .sum(),
+                )
+            })
             .collect();
         scored.sort_unstable_by(|left, right| right.1.total_cmp(&left.1));
         scored.truncate(limit);
@@ -84,11 +137,15 @@ impl VectorSnapshot {
 
 /// The cached snapshot for `dir` if it is exactly `generation`.
 pub(super) fn lookup(dir: &Path, generation: i64) -> Option<Arc<VectorSnapshot>> {
-    SHARDS
+    let hit = SHARDS
         .lock()
         .get(dir)
         .filter(|snapshot| snapshot.generation == generation)
-        .cloned()
+        .cloned();
+    if hit.is_some() {
+        HITS.fetch_add(1, Ordering::Relaxed);
+    }
+    hit
 }
 
 /// Generation of the snapshot cached for `dir`, if any.
@@ -110,5 +167,6 @@ pub(super) fn publish(dir: &Path, snapshot: &Arc<VectorSnapshot>) {
         .is_none_or(|current| current.generation < snapshot.generation);
     if newer {
         shards.insert(dir.to_path_buf(), Arc::clone(snapshot));
+        PUBLISHED.fetch_add(1, Ordering::Relaxed);
     }
 }

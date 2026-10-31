@@ -15,5 +15,5 @@ pub use context::{
     SCHEMA_VERSION, Symbol,
 };
 pub use frame::{FrameError, LineDecoder, MAX_FRAME_BYTES, encode_frame};
-pub use message::{DaemonStatus, ErrorKind, Frame, Request, Response};
+pub use message::{DaemonStatus, ErrorKind, Frame, Request, Response, VectorCacheStatus};
 pub use stats::{Hit, IndexStats};

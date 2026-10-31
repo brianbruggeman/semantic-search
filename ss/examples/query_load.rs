@@ -213,6 +213,8 @@ fn main() {
         clients,
     );
     during_reindex(&rig, &root, &search_args, clients);
+    let (_, _, status) = rig.timed(&rig.ssd, &["status"]);
+    println!("{}", status.trim());
     let _ = rig.timed(&rig.ssd, &["stop"]);
     println!("log={}", rig.home.join("logs/ssd.log").display());
 }

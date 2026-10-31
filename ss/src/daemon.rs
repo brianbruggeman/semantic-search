@@ -5,16 +5,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::store::vector_cache;
 use proxima::pipe::{Admission, DropReason, FailMode, Pipe, SinkFront};
 use proxima::telemetry::{info, warn};
 use ss_ipc::{InstanceLock, ListenerExt as _, Stream, listen};
 use ss_proto::{
     DaemonStatus, ErrorKind, Findings, Frame, GraphReply, Hit, IndexStats, LineDecoder, Request,
-    Response, encode_frame,
+    Response, VectorCacheStatus, encode_frame,
 };
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use crate::store::vector_cache;
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -219,6 +219,16 @@ impl Core {
             chunks_seen: self.totals.seen.load(Ordering::Relaxed),
             chunks_embedded: self.totals.embedded.load(Ordering::Relaxed),
             chunks_skipped: self.totals.skipped.load(Ordering::Relaxed),
+            vector_cache: {
+                let counters = vector_cache::counters();
+                VectorCacheStatus {
+                    hits: counters.hits,
+                    rebuilds_started: counters.started,
+                    rebuilds_published: counters.published,
+                    rebuilds_in_flight: counters.in_flight,
+                    max_in_flight: counters.max_in_flight,
+                }
+            },
         }
     }
 }

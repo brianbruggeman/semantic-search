@@ -119,6 +119,15 @@ fn print_status(status: &DaemonStatus) {
         "chunks: {} seen, {} embedded, {} skipped",
         status.chunks_seen, status.chunks_embedded, status.chunks_skipped
     );
+    let cache = &status.vector_cache;
+    println!(
+        "vector cache: hits={} rebuilds_started={} rebuilds_published={} in_flight={} max_in_flight={}",
+        cache.hits,
+        cache.rebuilds_started,
+        cache.rebuilds_published,
+        cache.rebuilds_in_flight,
+        cache.max_in_flight
+    );
 }
 
 async fn stop(client: &Client) -> Result<ExitCode, String> {

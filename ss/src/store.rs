@@ -300,6 +300,7 @@ impl Store {
 
     /// Loads every vector into memory and publishes it; `None` when over the limit or the dimensions disagree.
     fn build_snapshot(&self, generation: i64) -> rusqlite::Result<Option<Arc<VectorSnapshot>>> {
+        let _rebuild = vector_cache::RebuildGuard::begin();
         let (rows, bytes): (i64, i64) = self.conn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(length(v.vec)), 0) FROM chunks c JOIN vectors v ON v.key = c.key",
             [],
