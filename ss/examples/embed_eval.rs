@@ -11,6 +11,7 @@
 #![allow(
     clippy::expect_used,
     clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
     clippy::too_many_lines
 )]
 
@@ -534,8 +535,8 @@ fn start_line(gold: &str) -> u32 {
 
 fn in_half(query: &QueryRun, half: Half) -> bool {
     match half {
-        Half::Dev => start_line(&query.gold) % 2 == 1,
-        Half::Held => start_line(&query.gold) % 2 == 0,
+        Half::Dev => !start_line(&query.gold).is_multiple_of(2),
+        Half::Held => start_line(&query.gold).is_multiple_of(2),
         Half::All => true,
     }
 }
