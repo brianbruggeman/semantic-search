@@ -191,3 +191,24 @@ fn a_path_part_must_be_close_to_the_term_not_a_short_prefix_of_it() {
     let phrase = top(&dir, "orchestrator hand work", 5);
     assert!(!phrase.contains(&"orch-C2.md".to_owned()), "{phrase:?}");
 }
+
+const HANDOFF: &str = "how do the orchestrator, reviewer, writer and presenter actors hand work to each other";
+
+#[test]
+fn files_named_for_query_terms_outrank_semantic_hits_that_only_quote_them() {
+    let dir = actors_dir();
+    fs::write(dir.path().join("writer.md"), "# writer\n\nwrite the card.\n").expect("write");
+    fs::write(dir.path().join("orchestrator.md"), "# orchestrator\n\nhand direction to the writer and the reviewer.\n").expect("write");
+    fs::write(dir.path().join("presenter.md"), "# presenter\n\nhand the orchestrator the direction.\n").expect("write");
+    for index in 0..40 {
+        fs::write(dir.path().join(format!("trial/run-{index}.md")), "the orchestrator and the reviewer and the writer and the presenter actors hand work to each other.\n").expect("write");
+    }
+    let root = dir.path();
+    let mut quoted: Vec<String> = ["orchestrator.md", "presenter.md"].map(str::to_owned).to_vec();
+    quoted.extend((0..10).map(|index| format!("trial/run-{index}.md")));
+    let semantic: Vec<(String, usize, usize)> = quoted.iter().map(|rel| (root.join(rel).to_string_lossy().into_owned(), 1, 3)).collect();
+    let paths: Vec<String> = find(root, HANDOFF, &semantic).expect("find").hits.into_iter().map(|hit| hit.path).collect();
+    for named in ["reviewer.md", "writer.md", "orchestrator.md", "presenter.md"] {
+        assert!(paths.contains(&named.to_owned()), "{named} missing from {paths:?}");
+    }
+}

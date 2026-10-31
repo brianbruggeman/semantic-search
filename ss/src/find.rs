@@ -24,6 +24,7 @@ pub const MAX_FILES: usize = 5;
 pub const MAX_LINES: usize = 3;
 const RRF_K: f64 = 60.0;
 const PATH_WEIGHT: usize = 3;
+const STEM_LISTS: usize = 3;
 const PATH_MIN: usize = 4;
 const PATH_SUFFIX: usize = 3;
 const PATH_SHARE_DIV: usize = 4;
@@ -101,6 +102,7 @@ impl Found {
 struct Cand {
     path: String,
     named: usize,
+    stemmed: usize,
     score: usize,
     total: usize,
     range: Option<(usize, usize)>,
@@ -148,7 +150,7 @@ fn relative(root: &Path, path: &str) -> String {
 
 fn cand_of(root: &Path, matches: &FileMatches, tag: &'static str) -> Cand {
     let range = matches.lines.first().zip(matches.lines.last()).map(|(first, last)| (first.0, last.0));
-    Cand { path: relative(root, &matches.path), named: 0, score: 1, total: matches.total, range, lines: matches.lines.clone(), tags: vec![tag] }
+    Cand { path: relative(root, &matches.path), named: 0, stemmed: 0, score: 1, total: matches.total, range, lines: matches.lines.clone(), tags: vec![tag] }
 }
 
 fn by_total(mut cands: Vec<Cand>) -> Vec<Cand> {
@@ -228,10 +230,17 @@ fn path_terms(files: &[String], terms: &[String]) -> Vec<String> {
     terms.iter().filter(|term| parts.iter().filter(|found| names_part(term, found)).count() <= limit).cloned().collect()
 }
 
+/// Terms equal to the file's stem: `reviewer.md` is the answer to a query that says `reviewer`, not one more file near it.
+fn stem_hits(rel: &str, terms: &[String]) -> usize {
+    let stem = Path::new(rel).file_stem().map(|name| name.to_string_lossy().to_lowercase()).unwrap_or_default();
+    terms.iter().filter(|term| **term == stem).count()
+}
+
 fn term_scan_file(root: &Path, path: &Path, terms: &[String], named_terms: &[String]) -> Option<Cand> {
     let rel = relative(root, &path.to_string_lossy());
     let parts = path_parts(&rel);
     let named = named_terms.iter().filter(|term| names_part(term, &parts)).count();
+    let stemmed = stem_hits(&rel, named_terms);
     let text = match read_text(path) {
         Some(text) => text,
         None if named > 0 => String::new(),
@@ -255,7 +264,7 @@ fn term_scan_file(root: &Path, path: &Path, terms: &[String], named_terms: &[Str
     lines.sort_by_key(|row| row.1);
     let range = lines.first().zip(lines.last()).map(|(first, last)| (first.1, last.1));
     let kept = lines.into_iter().map(|(_, number, text)| (number, text)).collect();
-    (total > 0 || named > 0).then(|| Cand { path: rel, named, score: seen.len() + PATH_WEIGHT * named, total, range, lines: kept, tags: vec!["term-match"] })
+    (total > 0 || named > 0).then(|| Cand { path: rel, named, stemmed, score: seen.len() + PATH_WEIGHT * named + PATH_WEIGHT * STEM_LISTS * stemmed, total, range, lines: kept, tags: vec!["term-match"] })
 }
 
 fn phrase_cands(root: &Path, query: &str, semantic: &[(String, usize, usize)]) -> Vec<Cand> {
@@ -282,7 +291,7 @@ fn fuse(root: &Path, cands: Vec<Cand>, semantic: &[(String, usize, usize)]) -> V
     let mut scores: BTreeMap<String, f64> = BTreeMap::new();
     let mut table: BTreeMap<String, Cand> = BTreeMap::new();
     for (rank, cand) in cands.into_iter().enumerate() {
-        *scores.entry(cand.path.clone()).or_default() += rrf_share(rank) + named_share(cand.named);
+        *scores.entry(cand.path.clone()).or_default() += rrf_share(rank) + named_share(cand.named + STEM_LISTS * cand.stemmed);
         table.insert(cand.path.clone(), cand);
     }
     let mut files: Vec<(String, usize, usize)> = Vec::new();
@@ -294,7 +303,7 @@ fn fuse(root: &Path, cands: Vec<Cand>, semantic: &[(String, usize, usize)]) -> V
     }
     for (rank, (rel, start, end)) in files.into_iter().enumerate() {
         *scores.entry(rel.clone()).or_default() += rrf_share(rank);
-        let entry = table.entry(rel.clone()).or_insert_with(|| Cand { path: rel, named: 0, score: 0, total: 0, range: Some((start, end)), lines: Vec::new(), tags: Vec::new() });
+        let entry = table.entry(rel.clone()).or_insert_with(|| Cand { path: rel, named: 0, stemmed: 0, score: 0, total: 0, range: Some((start, end)), lines: Vec::new(), tags: Vec::new() });
         entry.tags.push("semantic");
     }
     let mut ranked: Vec<(String, f64)> = scores.into_iter().collect();
