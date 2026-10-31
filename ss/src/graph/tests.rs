@@ -93,6 +93,23 @@ fn rust_impl_blocks_qualify_methods_and_record_trait_implementation() {
 }
 
 #[test]
+fn rust_impl_blocks_are_nodes_spanning_the_whole_block() {
+    let text = "pub struct Walk;\n\nimpl Pipe for Walk {\n    type Out = u32;\n    fn call(&self) -> u32 {\n        1\n    }\n}\n\n/// inherent\nimpl<T> Walk {\n    pub fn new() -> Self {\n        Self\n    }\n}\n";
+
+    let graph = graph_for("src/walk.rs", text);
+
+    let trait_impl = node(&graph, "walk::impl Pipe for Walk");
+    assert_eq!(trait_impl.kind, NodeKind::Impl);
+    assert_eq!(trait_impl.name, "impl Pipe for Walk");
+    assert_eq!(trait_impl.signature, "impl Pipe for Walk");
+    assert_eq!((trait_impl.start_line, trait_impl.end_line), (3, 8));
+    let inherent = node(&graph, "walk::impl Walk");
+    assert_eq!(inherent.doc, "inherent");
+    assert_eq!((inherent.start_line, inherent.end_line), (11, 15));
+    assert!(has_edge(&graph, EdgeKind::Contains, "src/walk.rs", "walk::impl Walk"));
+}
+
+#[test]
 fn rust_use_lists_expand_to_one_import_per_leaf() {
     let text = "use std::collections::{HashMap, HashSet as Set};\nuse crate::chunk::*;\n";
 

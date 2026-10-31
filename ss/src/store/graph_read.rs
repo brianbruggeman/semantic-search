@@ -31,6 +31,7 @@ fn kind_of(text: &str) -> NodeKind {
         NodeKind::Struct,
         NodeKind::Enum,
         NodeKind::Trait,
+        NodeKind::Impl,
         NodeKind::Type,
         NodeKind::Function,
         NodeKind::Method,

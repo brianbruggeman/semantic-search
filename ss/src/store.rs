@@ -42,7 +42,7 @@ END;
 ";
 
 /// Bumped whenever the graph tables change shape or meaning; part of the pinned store identity.
-pub const GRAPH_VERSION: u32 = 1;
+pub const GRAPH_VERSION: u32 = 2;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(10_000);
 const WAL_ATTEMPTS: u32 = 200;
 const WAL_RETRY_PAUSE: Duration = Duration::from_millis(5);

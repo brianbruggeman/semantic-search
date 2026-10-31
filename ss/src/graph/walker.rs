@@ -43,6 +43,7 @@ pub struct Def<'t> {
 pub enum Item<'t> {
     Def(Def<'t>),
     Impl {
+        span: Node<'t>,
         ty: String,
         tr: Option<String>,
         body: Option<Node<'t>>,
@@ -143,7 +144,7 @@ impl<'c, 's> Walker<'c, 's> {
         for child in node.children(&mut cursor) {
             match classify(self.ctx, child, scope.within == Within::Type) {
                 Item::Def(def) => self.define(&def, scope),
-                Item::Impl { ty, tr, body } => self.implement(&ty, tr, body, scope),
+                Item::Impl { span, ty, tr, body } => self.implement(span, &ty, tr, body, scope),
                 Item::Imports(names) => self.imports(names, child),
                 Item::Call {
                     dst,
@@ -231,12 +232,13 @@ impl<'c, 's> Walker<'c, 's> {
         }
     }
 
-    fn implement(&mut self, ty: &str, tr: Option<String>, body: Option<Node<'_>>, scope: &Scope) {
+    fn implement(&mut self, span: Node<'_>, ty: &str, tr: Option<String>, body: Option<Node<'_>>, scope: &Scope) {
         let qpath = format!("{}::{ty}", scope.qpath);
-        if let Some(name) = tr {
+        if let Some(name) = &tr {
             let line = body.map_or(0, |node| line_of(node.start_position().row));
-            self.edge(EdgeKind::Implements, &qpath, &name, "", line);
+            self.edge(EdgeKind::Implements, &qpath, name, "", line);
         }
+        self.impl_node(span, ty, tr.as_deref(), body, scope);
         if let Some(body) = body {
             let inner = Scope {
                 qpath: qpath.clone(),
@@ -246,6 +248,25 @@ impl<'c, 's> Walker<'c, 's> {
             };
             self.walk(body, &inner);
         }
+    }
+
+    /// The `impl` block itself as a node, so a line on its header, an associated item or a gap between methods has a range.
+    fn impl_node(&mut self, span: Node<'_>, ty: &str, tr: Option<&str>, body: Option<Node<'_>>, scope: &Scope) {
+        let name = tr.map_or_else(|| format!("impl {ty}"), |tr| format!("impl {tr} for {ty}"));
+        let qpath = format!("{}::{name}", scope.qpath);
+        let line = line_of(span.start_position().row);
+        let src = if scope.qpath == self.module() { self.ctx.rel.to_owned() } else { scope.qpath.clone() };
+        self.edge(EdgeKind::Contains, &src, &qpath, &name, line);
+        self.nodes.push(GraphNode {
+            kind: NodeKind::Impl,
+            name,
+            qpath,
+            signature: signature(self.ctx, span, body),
+            doc: doc_of(self.ctx, span),
+            start_line: line,
+            end_line: line_of(span.end_position().row),
+            chunk_key: None,
+        });
     }
 
     fn imports(&mut self, names: Vec<(String, String)>, node: Node<'_>) {

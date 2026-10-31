@@ -58,6 +58,7 @@ fn implementation<'t>(ctx: &Ctx<'_>, node: Node<'t>) -> Item<'t> {
         return Item::Other;
     };
     Item::Impl {
+        span: node,
         ty: type_name(ctx, target),
         tr: node
             .child_by_field_name("trait")
