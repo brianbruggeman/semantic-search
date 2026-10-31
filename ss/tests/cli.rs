@@ -286,6 +286,40 @@ async fn daemon_exits_after_idle_period_when_no_watches_and_no_clients() {
     assert!(!env.run("ssd", &["status"]).status.success());
 }
 
+#[proxima::test(runtime = "tokio")]
+async fn daemon_outlives_a_connection_held_open_past_the_idle_period() {
+    let mut env = Env::new();
+    env.idle_secs = "2".to_owned();
+    tagged_copies(&env.root(), 1, "held");
+    assert_eq!(index_root(&env).status.code(), Some(0));
+
+    let held = ss_ipc::connect(&env.settings().endpoint())
+        .await
+        .expect("connect to the running daemon");
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    drop(held);
+
+    let disconnected = Instant::now();
+    while disconnected.elapsed() < Duration::from_secs(1) {
+        assert!(
+            env.run("ssd", &["status"]).status.success(),
+            "daemon shut down {:?} after the client disconnected, inside half the idle period",
+            disconnected.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let begun = Instant::now();
+    while env.run("ssd", &["status"]).status.success() && begun.elapsed() < Duration::from_secs(30)
+    {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        !env.run("ssd", &["status"]).status.success(),
+        "daemon never idled out"
+    );
+}
+
 #[test]
 fn two_async_tests_on_the_same_worker_thread_name_get_distinct_log_dirs() {
     let first = log_copy_name(Some("ss::cli first_test"), Some("tokio-rt-worker"), 100);
