@@ -18,20 +18,25 @@ pub enum Mode {
     Count,
 }
 
-fn lines_block(files: &[FileScan], here: &Path, prefix: bool, separators: bool) -> String {
+fn lines_block(files: &[FileScan], here: &Path, layout: Layout) -> String {
     let mut out = String::new();
     let mut last: Option<(usize, usize)> = None;
     for (slot, file) in files.iter().enumerate() {
         let name = shown(&file.path, here);
         for row in &file.rows {
-            if separators && last.is_some_and(|(prev, line)| prev != slot || line + 1 != row.line) {
+            if layout.separators
+                && last.is_some_and(|(prev, line)| prev != slot || line + 1 != row.line)
+            {
                 out.push_str("--\n");
             }
             let mark = if row.matched { ':' } else { '-' };
-            if prefix {
+            if layout.prefix {
                 let _ = write!(out, "{name}{mark}");
             }
-            let _ = writeln!(out, "{}{mark}{}", row.line, row.text);
+            if layout.numbered {
+                let _ = write!(out, "{}{mark}", row.line);
+            }
+            let _ = writeln!(out, "{}", row.text);
             last = Some((slot, row.line));
         }
     }
@@ -49,18 +54,12 @@ fn list_lines(files: &[FileScan], here: &Path, mode: Mode, prefix: bool) -> Vec<
         .collect()
 }
 
-/// The full result in rg's form: `path:line:text`, `path-line-text` context, `--` between blocks, `-c`, `-l`.
+/// The full result in grep's form: `path:text` (`path:line:text` with `-n`), `path-text` context, `--` between blocks, `-c`, `-l`.
 #[must_use]
-pub fn plain_text(
-    files: &[FileScan],
-    here: &Path,
-    mode: Mode,
-    prefix: bool,
-    separators: bool,
-) -> String {
-    match mode {
-        Mode::Lines => lines_block(files, here, prefix, separators),
-        _ => list_lines(files, here, mode, prefix).concat(),
+pub fn plain_text(files: &[FileScan], here: &Path, layout: Layout) -> String {
+    match layout.mode {
+        Mode::Lines => lines_block(files, here, layout),
+        mode => list_lines(files, here, mode, layout.prefix).concat(),
     }
 }
 
@@ -88,6 +87,8 @@ fn cut_list(lines: &[String], limit: usize, budget: usize) -> String {
 #[derive(Debug, Clone, Copy)]
 pub struct Layout {
     pub mode: Mode,
+    /// Print `line:` before each text (grep's `-n`).
+    pub numbered: bool,
     /// Print `path:` before each line (off for a single explicit file, as rg does).
     pub prefix: bool,
     /// Print `--` between non-adjacent context blocks.
@@ -99,7 +100,7 @@ pub struct Layout {
 /// The passthrough text when it fits `budget` tokens, else the grouped (or cut) form that fits.
 #[must_use]
 pub fn exact_reply(files: &[FileScan], here: &Path, layout: Layout, budget: usize) -> String {
-    let full = plain_text(files, here, layout.mode, layout.prefix, layout.separators);
+    let full = plain_text(files, here, layout);
     let limit = budget * 4;
     if full.chars().count() <= limit {
         return full;

@@ -22,7 +22,12 @@ const EXIT_ERROR: u8 = 2;
 // clap switches are independent flags, not a state machine
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Parser)]
-#[command(name = "ss", version, args_conflicts_with_subcommands = true)]
+#[command(
+    name = "ss",
+    version,
+    args_conflicts_with_subcommands = true,
+    disable_help_flag = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -91,9 +96,18 @@ struct Cli {
     /// Exact search: read the pattern as grep basic regex (no `\|` translation)
     #[arg(short = 'G', long)]
     basic: bool,
-    /// Accepted for grep compatibility and ignored: the path prefix follows rg's rules
+    /// Accepted for grep compatibility and ignored: the path prefix follows grep's rules
     #[arg(short = 'H', long)]
     with_filename: bool,
+    /// Exact search: no path prefix on matches
+    #[arg(short = 'h', long)]
+    no_filename: bool,
+    /// Exact search: print `line:` before each match (grep's -n)
+    #[arg(long)]
+    line_number: bool,
+    /// Print help
+    #[arg(long, action = clap::ArgAction::Help)]
+    help: Option<bool>,
     /// Matches shown per file in an exact search; more are counted as `+N more`
     #[arg(long, default_value_t = 5)]
     per_file: usize,
@@ -304,7 +318,7 @@ async fn run_search(client: &Client, cli: &Cli) -> Result<ExitCode, String> {
     }
 }
 
-const GREP_SWITCHES: &str = "rRnHiwFlcEGs";
+const GREP_SWITCHES: &str = "rRnHhiwFlcEGs";
 
 fn is_switch_cluster(arg: &OsStr) -> bool {
     arg.to_str().is_some_and(|text| {
@@ -316,7 +330,7 @@ fn is_switch_cluster(arg: &OsStr) -> bool {
     })
 }
 
-/// grep's `-n` is a bare switch; in the semantic form it takes a count. In an exact search drop it from switch clusters.
+/// grep's `-n` is a bare switch; in the semantic form it takes a count. In an exact search it becomes `--line-number`.
 fn grep_argv(args: Vec<OsString>) -> Vec<OsString> {
     let exact = args.iter().any(|arg| {
         arg == "--exact"
@@ -326,19 +340,31 @@ fn grep_argv(args: Vec<OsString>) -> Vec<OsString> {
     if !exact {
         return args;
     }
+    let mut numbered = false;
     args.into_iter()
-        .filter_map(|arg| {
-            if !is_switch_cluster(&arg) {
-                return Some(arg);
-            }
-            let rest: String = arg
-                .to_string_lossy()
-                .chars()
-                .filter(|letter| *letter != 'n')
-                .collect();
-            (rest != "-").then(|| OsString::from(rest))
+        .flat_map(exact_switches)
+        .filter(|arg| {
+            let repeat = arg == "--line-number" && numbered;
+            numbered |= arg == "--line-number";
+            !repeat
         })
         .collect()
+}
+
+fn exact_switches(arg: OsString) -> Vec<OsString> {
+    if !is_switch_cluster(&arg) {
+        return vec![arg];
+    }
+    let text = arg.to_string_lossy();
+    let rest: String = text.chars().filter(|letter| *letter != 'n').collect();
+    let mut out = Vec::new();
+    if text.contains('n') {
+        out.push(OsString::from("--line-number"));
+    }
+    if rest != "-" {
+        out.push(OsString::from(rest));
+    }
+    out
 }
 
 fn exact_patterns(cli: &Cli) -> (Vec<String>, Vec<PathBuf>) {
@@ -377,7 +403,8 @@ async fn run_exact(cli: &Cli) -> Result<ExitCode, String> {
     };
     let layout = Layout {
         mode,
-        prefix: !(paths.len() == 1 && paths[0].is_file()),
+        numbered: cli.line_number,
+        prefix: !cli.no_filename && !(paths.len() == 1 && paths[0].is_file()),
         separators: cli
             .context
             .or(cli.after_context)
