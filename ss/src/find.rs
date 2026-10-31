@@ -5,6 +5,7 @@
 //! See `ai_docs/find.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::json;
@@ -233,12 +234,16 @@ fn phrase_cands(root: &Path, query: &str, semantic: &[(String, usize, usize)]) -
     if semantic.is_empty() { cands } else { fuse(root, cands, semantic) }
 }
 
+fn rrf_share(rank: usize) -> f64 {
+    1.0 / (RRF_K + f64::from(u32::try_from(rank).unwrap_or(u32::MAX)) + 1.0)
+}
+
 /// Reciprocal rank fusion (k = 60) of the term-match order and the semantic file order, at file level.
 fn fuse(root: &Path, cands: Vec<Cand>, semantic: &[(String, usize, usize)]) -> Vec<Cand> {
     let mut scores: BTreeMap<String, f64> = BTreeMap::new();
     let mut table: BTreeMap<String, Cand> = BTreeMap::new();
     for (rank, cand) in cands.into_iter().enumerate() {
-        *scores.entry(cand.path.clone()).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+        *scores.entry(cand.path.clone()).or_default() += rrf_share(rank);
         table.insert(cand.path.clone(), cand);
     }
     let mut files: Vec<(String, usize, usize)> = Vec::new();
@@ -249,7 +254,7 @@ fn fuse(root: &Path, cands: Vec<Cand>, semantic: &[(String, usize, usize)]) -> V
         }
     }
     for (rank, (rel, start, end)) in files.into_iter().enumerate() {
-        *scores.entry(rel.clone()).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+        *scores.entry(rel.clone()).or_default() += rrf_share(rank);
         let entry = table.entry(rel.clone()).or_insert_with(|| Cand { path: rel, score: 0, total: 0, range: Some((start, end)), lines: Vec::new(), tags: Vec::new() });
         entry.tags.push("semantic");
     }
@@ -317,7 +322,7 @@ fn tag_text(tags: &[&str]) -> String {
 fn file_block(hit: &FileHit, lines: usize) -> String {
     let mut text = format!("{}:{}-{}  {}{}\n", hit.path, hit.range.0, hit.range.1, hit.purpose, tag_text(&hit.tags));
     for (number, line) in hit.lines.iter().take(lines) {
-        text.push_str(&format!("  {number}: {line}\n"));
+        let _ = writeln!(text, "  {number}: {line}");
     }
     text
 }
@@ -348,13 +353,15 @@ fn assemble(found: &Found, files: usize, lines: usize) -> String {
     for hit in found.hits.iter().take(files) {
         text.push_str(&file_block(hit, lines));
     }
-    found.notes.iter().for_each(|note| text.push_str(&format!("note: {note}\n")));
+    for note in &found.notes {
+        let _ = writeln!(text, "note: {note}");
+    }
     text.push_str(&graph_block(found));
     text.push_str(&next_line(found).unwrap_or_default());
     let dropped_files = found.hits.len() - files + found.beyond;
     let dropped_lines: usize = found.hits.iter().take(files).map(|hit| hit.lines.len().saturating_sub(lines)).sum();
     if dropped_files + dropped_lines > 0 {
-        text.push_str(&format!("cut: {dropped_files} files, {dropped_lines} lines\n"));
+        let _ = writeln!(text, "cut: {dropped_files} files, {dropped_lines} lines");
     }
     text
 }
