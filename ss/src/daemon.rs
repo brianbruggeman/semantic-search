@@ -789,6 +789,8 @@ async fn serve_connection(core: Arc<Core>, router: Arc<Router>, stream: Stream) 
     });
     let mut decoder = LineDecoder::new();
     let mut chunk = [0_u8; READ_CHUNK];
+    let mut requests = 0_usize;
+    let mut probes = 0_usize;
     while let Ok(read) = reader.read(&mut chunk).await {
         if read == 0 {
             break;
@@ -797,6 +799,8 @@ async fn serve_connection(core: Arc<Core>, router: Arc<Router>, stream: Stream) 
         while let Some(parsed) = decoder.next_frame::<Request>() {
             match parsed {
                 Ok(frame) => {
+                    requests += 1;
+                    probes += usize::from(matches!(frame.body, Request::Status));
                     tokio::spawn(answer(Arc::clone(&router), frame, replies.clone()));
                 }
                 Err(error) => {
@@ -812,6 +816,11 @@ async fn serve_connection(core: Arc<Core>, router: Arc<Router>, stream: Stream) 
     }
     drop(replies);
     let _ = writer_task.await;
+    // a client that waited on a long index reply must not leave the daemon already past the idle limit;
+    // status probes do not count as activity or polling for the exit would keep the daemon alive
+    if requests != probes || requests == 0 {
+        core.touch();
+    }
     core.clients.fetch_sub(1, Ordering::Relaxed);
 }
 
