@@ -18,6 +18,7 @@ mod scip;
 pub mod vector_cache;
 
 pub use graph_read::{EdgeRow, NodeRow};
+pub use scip::{DefRow, RefRow};
 
 pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);

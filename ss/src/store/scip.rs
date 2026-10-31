@@ -62,6 +62,123 @@ impl Store {
     }
 }
 
+/// A symbol's definition site: where it is declared and the line span of its whole item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefRow {
+    pub symbol_id: i64,
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+    pub col: u32,
+    pub enclosing: (u32, u32),
+}
+
+/// A reference occurrence: where a symbol is used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefRow {
+    pub file: String,
+    pub line: u32,
+    pub col: u32,
+}
+
+const DEF_SELECT: &str = "SELECT s.id, s.display_name, s.kind, o.file, o.start_line, o.start_col, \
+     COALESCE(o.enclosing_start, o.start_line), COALESCE(o.enclosing_end, o.end_line) \
+     FROM scip_occurrences o JOIN scip_symbols s ON s.id = o.symbol_id WHERE o.role & 1 = 1 AND s.symbol NOT LIKE 'local %'";
+
+fn def_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DefRow> {
+    Ok(DefRow {
+        symbol_id: row.get(0)?,
+        name: row.get(1)?,
+        kind: row.get(2)?,
+        file: row.get(3)?,
+        line: row.get(4)?,
+        col: row.get(5)?,
+        enclosing: (row.get(6)?, row.get(7)?),
+    })
+}
+
+impl Store {
+    /// Definitions whose display name equals `name`, or whose symbol string ends with `name`.
+    pub fn scip_defs_named(&self, name: &str) -> rusqlite::Result<Vec<DefRow>> {
+        let sql = format!(
+            "{DEF_SELECT} AND (s.display_name = ?1 OR s.symbol LIKE '%' || ?1 || '#' OR s.symbol LIKE '%' || ?1 || '().') \
+             ORDER BY o.file, o.start_line"
+        );
+        let mut statement = self.conn.prepare_cached(&sql)?;
+        statement.query_map([name], def_row)?.collect()
+    }
+
+    /// The definition of the symbol occurring at `file:line:col`.
+    pub fn scip_def_at(&self, file: &str, line: u32, col: u32) -> rusqlite::Result<Option<DefRow>> {
+        let sql = format!(
+            "{DEF_SELECT} AND s.id = (SELECT symbol_id FROM scip_occurrences WHERE file=?1 AND start_line=?2 \
+             AND start_col <= ?3 AND end_col > ?3 ORDER BY end_col - start_col LIMIT 1) LIMIT 1"
+        );
+        let mut statement = self.conn.prepare_cached(&sql)?;
+        statement
+            .query_map(params![file, line, col], def_row)?
+            .next()
+            .transpose()
+    }
+
+    /// Every non-definition occurrence of a symbol, file then line order.
+    pub fn scip_refs(&self, symbol_id: i64) -> rusqlite::Result<Vec<RefRow>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT file, start_line, start_col FROM scip_occurrences WHERE symbol_id=?1 AND role & 1 = 0 \
+             ORDER BY file, start_line, start_col",
+        )?;
+        statement
+            .query_map([symbol_id], |row| {
+                Ok(RefRow {
+                    file: row.get(0)?,
+                    line: row.get(1)?,
+                    col: row.get(2)?,
+                })
+            })?
+            .collect()
+    }
+
+    /// The innermost definition whose item span holds `file:line`.
+    pub fn scip_enclosing(&self, file: &str, line: u32) -> rusqlite::Result<Option<DefRow>> {
+        let sql = format!(
+            "{DEF_SELECT} AND o.file=?1 AND o.enclosing_start <= ?2 AND o.enclosing_end >= ?2 \
+             AND s.kind IN ('Function','Method','Constructor','Struct','Enum','Trait','Impl') \
+             ORDER BY o.enclosing_end - o.enclosing_start LIMIT 1"
+        );
+        let mut statement = self.conn.prepare_cached(&sql)?;
+        statement
+            .query_map(params![file, line], def_row)?
+            .next()
+            .transpose()
+    }
+
+    /// Definitions referenced from inside `def`'s item span, with the call line; same-symbol and local hits dropped.
+    pub fn scip_callees(&self, def: &DefRow) -> rusqlite::Result<Vec<(u32, DefRow)>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT DISTINCT o.start_line, o.symbol_id FROM scip_occurrences o WHERE o.file=?1 AND o.role & 1 = 0 \
+             AND o.start_line BETWEEN ?2 AND ?3 AND o.symbol_id != ?4 ORDER BY o.start_line",
+        )?;
+        let hits: Vec<(u32, i64)> = statement
+            .query_map(
+                params![def.file, def.enclosing.0, def.enclosing.1, def.symbol_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut callees = Vec::new();
+        for (line, symbol_id) in hits {
+            let sql = format!(
+                "{DEF_SELECT} AND s.id = ?1 AND s.kind IN ('Function','Method','Constructor') LIMIT 1"
+            );
+            let mut lookup = self.conn.prepare_cached(&sql)?;
+            if let Some(target) = lookup.query_map([symbol_id], def_row)?.next().transpose()? {
+                callees.push((line, target));
+            }
+        }
+        Ok(callees)
+    }
+}
+
 fn insert_symbols(tx: &Transaction<'_>, rows: &ScipRows) -> rusqlite::Result<HashMap<String, i64>> {
     let mut ids = HashMap::new();
     let mut statement = tx.prepare(
@@ -164,5 +281,42 @@ mod tests {
             .expect("second load");
         assert_eq!(store.scip_counts().expect("counts"), (1, 1, 1));
         assert_eq!(store.scip_hash("b.rs").expect("hash"), None);
+    }
+
+    #[test]
+    fn references_map_to_their_enclosing_definition_and_definitions_resolve_by_name() {
+        let dir = tempfile::tempdir().expect("scratch dir for the store");
+        let config = StoreConfig {
+            dir: dir.path().to_path_buf(),
+            model_id: "test-model".into(),
+        };
+        let mut store = Store::open(&config).expect("open writer");
+        let mut rows = rows_for(&["a.rs"]);
+        rows.symbols[0].kind = "Function".into();
+        rows.occurrences.push(OccurrenceRow {
+            start_line: 5,
+            enclosing: None,
+            role: 0,
+            ..rows.occurrences[0].clone()
+        });
+        store.load_scip(&rows, &HashMap::new()).expect("load");
+        let defs = store
+            .scip_defs_named("Store")
+            .expect("defs by display name");
+        assert_eq!(defs.len(), 1);
+        let refs = store.scip_refs(defs[0].symbol_id).expect("refs");
+        assert_eq!(
+            refs,
+            vec![RefRow {
+                file: "a.rs".into(),
+                line: 5,
+                col: 11
+            }]
+        );
+        let owner = store
+            .scip_enclosing("a.rs", 5)
+            .expect("enclosing")
+            .expect("a definition spans line 5");
+        assert_eq!(owner.name, "Store");
     }
 }

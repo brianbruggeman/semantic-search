@@ -3,6 +3,7 @@
 //! A transform `Vec<u8> -> Result<ScipRows, ScipError>` composed of two steps; no new pipe type is needed.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 use std::path::Path;
 
 use protobuf::Message;
@@ -10,7 +11,7 @@ use scip::types::{Document, Index, SymbolInformation, SymbolRole};
 use thiserror::Error;
 
 use crate::chunk::ChunkKey;
-use crate::store::Store;
+use crate::store::{DefRow, Store};
 
 #[derive(Debug, Error)]
 pub enum ScipError {
@@ -144,6 +145,173 @@ fn span(range: &[i32]) -> Option<(u32, u32, u32, u32)> {
         [line, col, end_line, end_col] => Some((*line, *col, *end_line, *end_col)),
         _ => None,
     }
+}
+
+pub const REFS_BUDGET: usize = 600;
+
+/// Tag for a file's SCIP rows: `scip` while the file still hashes to the recorded blake3, `stale` once it
+/// differs, `none` when the file never had SCIP rows (callers fall back to name-resolved edges there).
+#[must_use]
+pub fn freshness(store: &Store, root: &Path, file: &str) -> &'static str {
+    let recorded = store.scip_hash(file).ok().flatten();
+    let current = std::fs::read(root.join(file))
+        .ok()
+        .map(|bytes| *blake3::hash(&bytes).as_bytes());
+    match (recorded, current) {
+        (None, _) => "none",
+        (Some(old), Some(now)) if old == now => "scip",
+        _ => "stale",
+    }
+}
+
+/// `path:line:col` (1-based, as editors print) or a symbol name; returns its definitions.
+pub fn find_defs(store: &Store, target: &str) -> rusqlite::Result<Vec<DefRow>> {
+    let parts: Vec<&str> = target.rsplitn(3, ':').collect();
+    if let [col, line, file] = parts.as_slice()
+        && let (Ok(line), Ok(col)) = (line.parse::<u32>(), col.parse::<u32>())
+    {
+        return Ok(store
+            .scip_def_at(file, line.saturating_sub(1), col.saturating_sub(1))?
+            .into_iter()
+            .collect());
+    }
+    store.scip_defs_named(target)
+}
+
+fn fits(text: &mut String, line: &str, budget: usize) -> bool {
+    if (text.len() + line.len()).div_ceil(4) > budget {
+        return false;
+    }
+    text.push_str(line);
+    true
+}
+
+fn cut_line(text: &mut String, cut: usize) {
+    if cut > 0 {
+        let _ = writeln!(text, "cut: {cut} more; raise --budget");
+    }
+}
+
+#[must_use]
+pub fn render_defs(store: &Store, root: &Path, defs: &[DefRow]) -> String {
+    let mut text = String::new();
+    for def in defs {
+        let tag = freshness(store, root, &def.file);
+        let _ = writeln!(
+            text,
+            "{}:{}:{} {} {} resolved={tag}",
+            def.file,
+            def.line + 1,
+            def.col + 1,
+            def.kind,
+            def.name
+        );
+    }
+    text
+}
+
+/// References grouped by file as `file:line enclosing`, cut at `budget` tokens (chars / 4) with a `cut:` line.
+pub fn render_refs(
+    store: &Store,
+    root: &Path,
+    defs: &[DefRow],
+    budget: usize,
+) -> rusqlite::Result<String> {
+    let mut text = String::new();
+    let mut cut = 0;
+    for def in defs {
+        let refs = store.scip_refs(def.symbol_id)?;
+        let header = format!(
+            "{} {} {}:{} refs={}\n",
+            def.kind,
+            def.name,
+            def.file,
+            def.line + 1,
+            refs.len()
+        );
+        if !fits(&mut text, &header, budget) {
+            cut += refs.len();
+            continue;
+        }
+        let mut last_file = "";
+        for reference in &refs {
+            let owner = store
+                .scip_enclosing(&reference.file, reference.line)?
+                .map_or_else(String::new, |owner| owner.name);
+            let heading = if last_file == reference.file {
+                String::new()
+            } else {
+                format!(
+                    "  {} [{}]\n",
+                    reference.file,
+                    freshness(store, root, &reference.file)
+                )
+            };
+            let line = format!("{heading}    :{} {owner}\n", reference.line + 1);
+            if fits(&mut text, &line, budget) {
+                last_file = &reference.file;
+            } else {
+                cut += 1;
+            }
+        }
+    }
+    cut_line(&mut text, cut);
+    Ok(text)
+}
+
+/// Callees (references inside the item span, resolved to definitions) and callers (references mapped to their
+/// enclosing definition) of each definition, each edge tagged with the freshness of the file stating it.
+pub fn render_calls(
+    store: &Store,
+    root: &Path,
+    defs: &[DefRow],
+    budget: usize,
+) -> rusqlite::Result<String> {
+    let mut text = String::new();
+    let mut cut = 0;
+    for def in defs {
+        let tag = freshness(store, root, &def.file);
+        fits(
+            &mut text,
+            &format!(
+                "{} {} {}:{} resolved={tag}\n",
+                def.kind,
+                def.name,
+                def.file,
+                def.line + 1
+            ),
+            budget,
+        );
+        for (line, callee) in store.scip_callees(def)? {
+            let row = format!(
+                "  callee {} {}:{} (at :{})\n",
+                callee.name,
+                callee.file,
+                callee.line + 1,
+                line + 1
+            );
+            if !fits(&mut text, &row, budget) {
+                cut += 1;
+            }
+        }
+        for reference in store.scip_refs(def.symbol_id)? {
+            let Some(owner) = store.scip_enclosing(&reference.file, reference.line)? else {
+                continue;
+            };
+            let row = format!(
+                "  caller {} {}:{} resolved={}\n",
+                owner.name,
+                reference.file,
+                reference.line + 1,
+                freshness(store, root, &reference.file)
+            );
+            if !fits(&mut text, &row, budget) {
+                cut += 1;
+            }
+        }
+    }
+    cut_line(&mut text, cut);
+    Ok(text)
 }
 
 #[cfg(test)]

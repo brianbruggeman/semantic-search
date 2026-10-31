@@ -12,7 +12,7 @@ use ss::render::{
     COMPACT_BUDGET, Compact, Layout, Mode, compact_text, exact_reply, facets, findings_json,
     findings_text, graph_json, graph_text, lines_text,
 };
-use ss::scip::load_file;
+use ss::scip::{REFS_BUDGET, find_defs, load_file, render_calls, render_defs, render_refs};
 use ss::settings::Settings;
 use ss::store::Store;
 use ss_proto::{Hit, Request, Response};
@@ -174,6 +174,21 @@ enum Command {
         #[command(subcommand)]
         action: ScipAction,
     },
+    /// Definition of a symbol name or `path:line:col` from the SCIP index
+    Def {
+        target: String,
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// References of a symbol from the SCIP index, grouped by file with the enclosing symbol
+    Refs {
+        target: String,
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Cap the reply at about this many tokens (chars / 4); default 600
+        #[arg(long)]
+        budget: Option<usize>,
+    },
     /// Index a directory (created as a root on first use) and wait for it to finish
     Index { path: PathBuf },
     /// Show the neighbourhood of a symbol name or path:line: members, callers, callees, importers, tests
@@ -194,6 +209,14 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ScipAction {
+    /// Callers and callees of a symbol from compiler-resolved occurrences, tagged by freshness
+    Calls {
+        target: String,
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        budget: Option<usize>,
+    },
     /// Load an index.scip (for example from `rust-analyzer scip`) into the root's store
     Load {
         index: PathBuf,
@@ -258,15 +281,19 @@ async fn main() -> ExitCode {
         }
         _ => {}
     }
-    if let Some(Command::Scip { action: ScipAction::Load { index, root } }) = &cli.command {
-        return run_scip_load(index, root.as_deref());
+    match &cli.command {
+        Some(Command::Scip { action: ScipAction::Load { index, root } }) => return run_scip_load(index, root.as_deref()),
+        Some(Command::Scip { action: ScipAction::Calls { target, root, budget } }) => return run_scip_query(Query::Calls, target, root.as_deref(), *budget),
+        Some(Command::Def { target, root }) => return run_scip_query(Query::Def, target, root.as_deref(), None),
+        Some(Command::Refs { target, root, budget }) => return run_scip_query(Query::Refs, target, root.as_deref(), *budget),
+        _ => {}
     }
     let client = match Settings::load() {
         Ok(settings) => Client::new(settings),
         Err(error) => return fail(&format!("bad SS_* configuration: {error}")),
     };
     let outcome = match cli.command {
-        Some(Command::Show { .. } | Command::Diff { .. } | Command::Outline { .. } | Command::Section { .. } | Command::Scip { .. }) => {
+        Some(Command::Show { .. } | Command::Diff { .. } | Command::Outline { .. } | Command::Section { .. } | Command::Scip { .. } | Command::Def { .. } | Command::Refs { .. }) => {
             unreachable_history()
         }
         Some(Command::Index { path }) => run_index(&client, &path).await,
@@ -279,6 +306,36 @@ async fn main() -> ExitCode {
         None => run_search(&client, &cli).await,
     };
     outcome.unwrap_or_else(|message| fail(&message))
+}
+
+#[derive(Clone, Copy)]
+enum Query {
+    Def,
+    Refs,
+    Calls,
+}
+
+fn run_scip_query(query: Query, target: &str, root: Option<&Path>, budget: Option<usize>) -> ExitCode {
+    let outcome = (|| -> Result<String, String> {
+        let here = std::env::current_dir().map_err(|error| error.to_string())?;
+        let root = PathBuf::from(absolute(root.unwrap_or(&here))?);
+        let settings = Settings::load().map_err(|error| error.to_string())?;
+        let store = Store::open_reader(&settings.store_config(&root)).map_err(|error| error.to_string())?;
+        let defs = find_defs(&store, target).map_err(|error| error.to_string())?;
+        let budget = budget.unwrap_or(REFS_BUDGET);
+        match query {
+            Query::Def => Ok(render_defs(&store, &root, &defs)),
+            Query::Refs => render_refs(&store, &root, &defs, budget).map_err(|error| error.to_string()),
+            Query::Calls => render_calls(&store, &root, &defs, budget).map_err(|error| error.to_string()),
+        }
+    })();
+    match outcome {
+        Ok(text) => {
+            print!("{text}");
+            exit_for(!text.is_empty())
+        }
+        Err(message) => fail(&message),
+    }
 }
 
 fn run_scip_load(index: &Path, root: Option<&Path>) -> ExitCode {
