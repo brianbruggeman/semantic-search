@@ -14,6 +14,7 @@ use ss_proto::{
 };
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use crate::store::vector_cache;
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -84,6 +85,7 @@ pub struct Core {
 
 impl Core {
     fn new(settings: Settings, pool: EmbedPool, registry: Registry) -> Self {
+        vector_cache::set_limit_mb(settings.vector_cache_mb);
         Self {
             settings,
             hub: WatchHub::default(),

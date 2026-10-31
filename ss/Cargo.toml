@@ -16,6 +16,7 @@ futures = "0.3.34"
 ignore = "0.4.34"
 notify = "8.2.1"
 proxima = { version = "0.1.0", path = "../../../slot-0/proxima", package = "proxima-lib", default-features = false, features = ["macros", "runtime-tokio", "tokio"] }
+proxima-primitives = { version = "0.1.0", path = "../../../slot-0/proxima/proxima-primitives", features = ["std"] }
 proxima-telemetry = { version = "0.1.0", path = "../../../slot-0/proxima/proxima-telemetry", features = ["std", "emit", "macros"] }
 regex = "1.13.1"
 rusqlite = { version = "0.41.1", features = ["bundled"] }

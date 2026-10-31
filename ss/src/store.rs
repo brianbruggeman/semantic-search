@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -9,8 +10,10 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use crate::chunk::{ChunkKey, RawChunk};
 use crate::error::IndexError;
 use crate::graph::{FileGraph, GraphEdge, GraphNode};
+use vector_cache::VectorSnapshot;
 
 mod graph_read;
+pub mod vector_cache;
 
 pub use graph_read::{EdgeRow, NodeRow};
 
@@ -66,6 +69,7 @@ pub struct ChunkRow {
 
 pub struct Store {
     conn: Connection,
+    dir: PathBuf,
 }
 
 impl Store {
@@ -77,7 +81,10 @@ impl Store {
         conn.execute_batch("PRAGMA busy_timeout=10000; PRAGMA synchronous=NORMAL;")?;
         enter_wal(&conn)?;
         conn.execute_batch(SCHEMA)?;
-        let store = Self { conn };
+        let store = Self {
+            conn,
+            dir: config.dir.clone(),
+        };
         store.pin_model(&config.model_id)?;
         Ok(store)
     }
@@ -95,6 +102,7 @@ impl Store {
             .execute_batch(
             "DELETE FROM vectors; DELETE FROM chunks; DELETE FROM files; DELETE FROM nodes; DELETE FROM edges;",
         )?;
+        bump_generation(&self.conn)?;
         self.conn.execute(
             "INSERT OR REPLACE INTO meta(k, v) VALUES ('model', ?1)",
             [pinned],
@@ -183,19 +191,18 @@ impl Store {
             "INSERT OR REPLACE INTO files(path, mtime_ns, size, hash) VALUES (?1, ?2, ?3, ?4)",
             params![path, row.mtime_ns, row.size, row.hash.as_slice()],
         )?;
+        bump_generation(&tx)?;
         tx.commit()
     }
 
     pub fn remove_file(&self, path: &str) -> rusqlite::Result<usize> {
-        let removed = self
-            .conn
-            .execute("DELETE FROM chunks WHERE path=?1", [path])?;
-        self.conn
-            .execute("DELETE FROM files WHERE path=?1", [path])?;
-        self.conn
-            .execute("DELETE FROM nodes WHERE file=?1", [path])?;
-        self.conn
-            .execute("DELETE FROM edges WHERE file=?1", [path])?;
+        let tx = self.conn.unchecked_transaction()?;
+        let removed = tx.execute("DELETE FROM chunks WHERE path=?1", [path])?;
+        tx.execute("DELETE FROM files WHERE path=?1", [path])?;
+        tx.execute("DELETE FROM nodes WHERE file=?1", [path])?;
+        tx.execute("DELETE FROM edges WHERE file=?1", [path])?;
+        bump_generation(&tx)?;
+        tx.commit()?;
         Ok(removed)
     }
 
@@ -257,9 +264,70 @@ impl Store {
         Ok(u64::try_from(total).unwrap_or(0))
     }
 
-    /// Exact cosine scan (vectors are stored unit-length) over chunks under `prefix`.
+    /// Write counter bumped by every transaction that changes chunks or vectors; read inside the caller's snapshot.
+    pub fn generation(&self) -> rusqlite::Result<i64> {
+        let text: Option<String> = self
+            .conn
+            .query_row("SELECT v FROM meta WHERE k='gen'", [], |row| row.get(0))
+            .optional()?;
+        Ok(text.and_then(|value| value.parse().ok()).unwrap_or(0))
+    }
+
+    /// Exact cosine scan (vectors are stored unit-length) over chunks under `prefix`. Scores the in-memory
+    /// [`VectorSnapshot`] for the current generation, building it once; a shard over the cache limit scans SQLite.
     #[proxima::instrument]
     pub fn vector_search(
+        &self,
+        query: &[f32],
+        prefix: &str,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<i64>> {
+        let _own_snapshot = self
+            .conn
+            .is_autocommit()
+            .then(|| self.read_snapshot())
+            .transpose()?;
+        let generation = self.generation()?;
+        let cached = match vector_cache::lookup(&self.dir, generation) {
+            Some(snapshot) => Some(snapshot),
+            None => self.build_snapshot(generation)?,
+        };
+        match cached {
+            Some(snapshot) => Ok(snapshot.top(query, prefix, limit)),
+            None => self.scan_sqlite(query, prefix, limit),
+        }
+    }
+
+    /// Loads every vector into memory and publishes it; `None` when over the limit or the dimensions disagree.
+    fn build_snapshot(&self, generation: i64) -> rusqlite::Result<Option<Arc<VectorSnapshot>>> {
+        let (rows, bytes): (i64, i64) = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(length(v.vec)), 0) FROM chunks c JOIN vectors v ON v.key = c.key",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let rows = usize::try_from(rows).unwrap_or(0);
+        let bytes = usize::try_from(bytes).unwrap_or(0);
+        if rows == 0 || bytes > vector_cache::limit_bytes() {
+            return Ok(None);
+        }
+        let mut snapshot = VectorSnapshot::new(generation, bytes / rows / 4);
+        let mut statement = self.conn.prepare_cached(
+            "SELECT c.id, c.path, v.vec FROM chunks c JOIN vectors v ON v.key = c.key",
+        )?;
+        let mut cursor = statement.query([])?;
+        while let Some(row) = cursor.next()? {
+            let (id, path): (i64, String) = (row.get(0)?, row.get(1)?);
+            if !snapshot.push(id, path, row.get_ref(2)?.as_blob()?) {
+                return Ok(None);
+            }
+        }
+        let snapshot = Arc::new(snapshot);
+        vector_cache::publish(&self.dir, &snapshot);
+        Ok(Some(snapshot))
+    }
+
+    /// The uncached scan: reads every blob out of SQLite per call.
+    pub fn scan_sqlite(
         &self,
         query: &[f32],
         prefix: &str,
@@ -385,6 +453,14 @@ fn insert_edge(tx: &Transaction<'_>, path: &str, edge: &GraphEdge) -> rusqlite::
             edge.qual,
             edge.line
         ],
+    )?;
+    Ok(())
+}
+
+fn bump_generation(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO meta(k, v) VALUES ('gen', '1') ON CONFLICT(k) DO UPDATE SET v = CAST(v AS INTEGER) + 1",
+        [],
     )?;
     Ok(())
 }
