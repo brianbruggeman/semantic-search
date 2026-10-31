@@ -120,7 +120,7 @@ async fn queries_during_a_reindex_see_one_generation_and_return_hits() {
         .map(|_| {
             let (settings, done) = (settings.clone(), Arc::clone(&done));
             thread::spawn(move || {
-                let store = Store::open(&settings).expect("reader open");
+                let store = Store::open_reader(&settings).expect("reader open");
                 let probe = embed("worker pool threads");
                 let mut searches = 0_usize;
                 while !done.load(Ordering::Relaxed) || searches == 0 {
