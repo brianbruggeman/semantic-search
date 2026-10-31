@@ -52,5 +52,5 @@ The text is the first sentence of the first paragraph (cut at `. ` or a blank li
  "cut": 31, "coverage": {"with": 38, "total": 52, "percent": 73}}
 ```
 
-`dirs` and `files` hold only what survived the budget and depth, in the printed order. `files` counts in `dirs` are
-the shown ones.
+`dirs` and `files` hold only what survived the budget and depth, in the printed order. `dirs[].files` and
+`dirs[].tokens` are the full counts of that directory, so they can exceed the entries of `files` under it.
