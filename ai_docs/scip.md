@@ -28,3 +28,13 @@ index.scip`, then `ss scip load index.scip`. It is minutes of CPU on a loaded ma
 
 The loader reads the SCIP protobuf only, so any indexer works unchanged: `scip-typescript`, `scip-python`, `scip-go`
 write the same format; symbol strings differ, the tables do not.
+
+## Queries
+
+All read the root's store only (no daemon); `--root DIR` picks the root, default the current directory.
+
+- `ss def TARGET`: definition of a symbol name or `path:line:col`.
+- `ss refs TARGET [--budget N]`: references grouped by file with the enclosing symbol; budget default 600 tokens.
+- `ss scip calls TARGET [--budget N]`: callers and callees from compiler-resolved occurrences, tagged by freshness;
+  budget default 600 tokens.
+- `ss scip load INDEX [--root DIR]`: load an `index.scip` generated for the root.

@@ -39,7 +39,7 @@ BadRequest|Internal}`. `LineDecoder::push(&[u8])` / `next_frame()` do the framin
 
 ## pipe decomposition (each stage `Pipe`, error `IndexError`)
 - source (`In = ()`): `Walk` -> `Vec<PathBuf>` (`ignore`, gitignore-aware); watcher batches enter as the same list.
-- transform `ReadFile`: `PathBuf -> Flow<SourceFile>` (mtime+size, then content hash; skips binary/oversize/vanished).
+- transform `ReadFile`: `PathBuf -> Flow<SourceFile>` (mtime+size, then content hash; skips binary/oversize/vanished, and files the process may not read (`PermissionDenied`: counted as seen, no rows, the run continues)).
 - transform `Chunk`: `Flow<SourceFile> -> Flow<FileChunks>` (tree-sitter rust/python/ts/js/go, 40-line windows
   otherwise; key = blake3(chunk text)).
 - transform `Embed`: `Flow<FileChunks> -> Flow<EmbeddedFile>`: asks the store which keys exist (hash-skip) and embeds

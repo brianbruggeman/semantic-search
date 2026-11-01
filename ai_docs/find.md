@@ -23,7 +23,7 @@ results in as plain data (`semantic: &[String]`, `graph: Option<String>`).
    when it has rows (tag `resolved-fresh`), else skipped with a note.
 3. `REGEX`: any of `\.*+?()[]{}|^$`: the `--exact` scan, grouped by file, most matching lines first.
 4. `PHRASE`: the rest. Terms are the R1 method of `tests/data/rg_baseline.py` (stopwords dropped, identifiers split on
-   underscore and case, the identifier itself kept); files rank by distinct terms matched, then total matches. When
+   underscore and case, the identifier itself kept); files rank by distinct terms matched (plus the path-name bonus below), then total matches. When
    a daemon is already running (never spawned) its hybrid file ranking is merged with reciprocal rank fusion
    (k = 60) at file level.
 
@@ -50,11 +50,13 @@ Exit 0 when anything is found, 1 when nothing, 2 on error (bad regex, missing ro
 A learned router (above); scoring phrases by embedding only (needs the daemon, fails cold); spawning the daemon from
 `find` (a front door must not start a process).
 
-## Path-named files (PHRASE)
-
-A query term that names a path component (`queue`, `personas`, `judge`, `reviewer`; prefix either way within 3 letters,
-so `personas` meets `persona`) marks the file as an owner of that topic: score +3 per term, a file with no content match
-still qualifies, and in fusion each term counts as one extra first place. A term naming more than a quarter of all
-files (`trial` in a corpus that is mostly `trial/`) is ignored, since it points at everything. Evidence on a 407-file
-corpus: path terms off, the top three were quoting files in `trial/`; on, `improvements/queue/*`, `personas/*` and
-`trial/judge-report-*` lead. A per-directory cap changed no top five, so none was added.
+A query term that names a path component (`queue`, `personas`, `judge`, `reviewer`) marks the file as an owner of that
+topic. Terms and components shorter than 4 letters never match (`PATH_MIN`); otherwise one must be a prefix of the other
+and their lengths differ by at most 3 (`PATH_SUFFIX`), so `personas` meets `persona` but `orchestrator` does not meet
+`orch`. A match scores +3 per term (`PATH_WEIGHT`), a file with no content match still qualifies, and in fusion each term
+counts as one extra first place. A term equal to the file stem (`reviewer.md` for `reviewer`) is the answer rather than
+a neighbour: it adds a further +9 (`PATH_WEIGHT * STEM_LISTS`, 3 lists) and 3 more first places in fusion. A term
+naming more than a quarter of all files (`trial` in a corpus that is mostly `trial/`; limit is `max(1, files / 4)`) is
+ignored, since it points at everything. Evidence on a 407-file corpus: path terms off, the top three were quoting files
+in `trial/`; on, `improvements/queue/*`, `personas/*` and `trial/judge-report-*` lead. A per-directory cap changed no top
+five, so none was added.
