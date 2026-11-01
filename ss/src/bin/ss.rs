@@ -212,12 +212,14 @@ enum Command {
     /// Definition of a symbol name or `path:line:col` from the SCIP index
     Def {
         target: String,
+        /// Root whose SCIP rows to read (default: the current directory)
         #[arg(long)]
         root: Option<PathBuf>,
     },
     /// References of a symbol from the SCIP index, grouped by file with the enclosing symbol
     Refs {
         target: String,
+        /// Root whose SCIP rows to read (default: the current directory)
         #[arg(long)]
         root: Option<PathBuf>,
         /// Cap the reply at about this many tokens (chars / 4); default 600
@@ -247,8 +249,10 @@ enum ScipAction {
     /// Callers and callees of a symbol from compiler-resolved occurrences, tagged by freshness
     Calls {
         target: String,
+        /// Root whose SCIP rows to read (default: the current directory)
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Cap the reply at about this many tokens (chars / 4); default 600
         #[arg(long)]
         budget: Option<usize>,
     },
