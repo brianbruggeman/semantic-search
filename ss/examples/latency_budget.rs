@@ -47,6 +47,7 @@ impl Row {
     }
 }
 
+#[cfg(unix)]
 fn children_cpu() -> Duration {
     // SAFETY: getrusage fills the zeroed struct it is handed
     let usage = unsafe {
@@ -59,6 +60,11 @@ fn children_cpu() -> Duration {
             + u64::try_from(value.tv_usec).unwrap_or(0)
     };
     Duration::from_micros(micros(usage.ru_utime) + micros(usage.ru_stime))
+}
+
+#[cfg(not(unix))]
+fn children_cpu() -> Duration {
+    Duration::ZERO
 }
 
 fn millis(duration: Duration) -> f64 {

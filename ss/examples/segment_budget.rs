@@ -23,6 +23,7 @@ const K1_US: f64 = 5.0;
 const K2_MS: f64 = 10.0;
 const K3_MS: f64 = 2.0;
 
+#[cfg(unix)]
 fn thread_cpu_ns() -> u64 {
     let mut spec = libc::timespec {
         tv_sec: 0,
@@ -34,6 +35,12 @@ fn thread_cpu_ns() -> u64 {
         + u64::try_from(spec.tv_nsec).unwrap_or(0)
 }
 
+#[cfg(not(unix))]
+fn thread_cpu_ns() -> u64 {
+    0
+}
+
+#[cfg(unix)]
 fn process_cpu_ms() -> f64 {
     // SAFETY: getrusage fills the zeroed struct it is handed
     let usage = unsafe {
@@ -43,6 +50,11 @@ fn process_cpu_ms() -> f64 {
     };
     let micros = |value: libc::timeval| (value.tv_sec as f64) * 1e6 + f64::from(value.tv_usec);
     (micros(usage.ru_utime) + micros(usage.ru_stime)) / 1000.0
+}
+
+#[cfg(not(unix))]
+fn process_cpu_ms() -> f64 {
+    0.0
 }
 
 fn p99(mut samples: Vec<f64>) -> f64 {
