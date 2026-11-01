@@ -883,6 +883,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn cpu_micros() -> u64 {
         let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
         // SAFETY: getrusage fills the zeroed rusage it is given; RUSAGE_SELF is always valid.
@@ -896,6 +897,7 @@ mod tests {
         micros(usage.ru_utime) + micros(usage.ru_stime)
     }
 
+    #[cfg(unix)]
     #[proxima::test(runtime = "tokio")]
     async fn real_model_first_query_after_warm_up_costs_within_3x_the_tenth_in_cpu_time() {
         let cache = tempfile::tempdir().expect("model cache dir");
