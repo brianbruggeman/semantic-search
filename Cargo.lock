@@ -3087,6 +3087,8 @@ dependencies = [
 [[package]]
 name = "proxima-auth"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ca3ee9a6528a40c62ab631a585de10651b6db86363425e1fc045e165a11dfe5"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -3101,6 +3103,8 @@ dependencies = [
 [[package]]
 name = "proxima-build"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0df25067385598ff6a0291399d9be8e7a4fa53f8c78424ae84f2cde9ef936a05"
 dependencies = [
  "conflaguration",
  "serde",
@@ -3111,6 +3115,8 @@ dependencies = [
 [[package]]
 name = "proxima-clock"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ee71d600d494c5a5ac09d5d793f7b7b27e07e0ebed05cd753d688b294746745"
 dependencies = [
  "proxima-primitives",
 ]
@@ -3118,6 +3124,8 @@ dependencies = [
 [[package]]
 name = "proxima-codec"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37f47b733914794e3eda35ca387de6c146b7bb24b1d2ffc0580ee17b4c942322"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3132,6 +3140,8 @@ dependencies = [
 [[package]]
 name = "proxima-config"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ffa541e12fef7a264e6a53f7592877c6d5601d4d76692118252dcaa674afe54"
 dependencies = [
  "arc-swap",
  "fastrand",
@@ -3153,6 +3163,8 @@ dependencies = [
 [[package]]
 name = "proxima-core"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b78fa81b6cc7a3d9e5fb4dc1e1e1fb5fb8b713e25e6d0af076f3b367c5324e5"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -3169,6 +3181,8 @@ dependencies = [
 [[package]]
 name = "proxima-gguf"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d12a7a2333539944004a2ce72b31cce96de3e822d1d89e8c7f2c5b637e7653fb"
 dependencies = [
  "arrayvec",
  "bon",
@@ -3183,6 +3197,8 @@ dependencies = [
 [[package]]
 name = "proxima-http"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ece94d918a7b6b2a67fe1a67906b8053d1fd7b3267a82f2d467379523c163cb0"
 dependencies = [
  "bon",
  "bumpalo",
@@ -3208,6 +3224,8 @@ dependencies = [
 [[package]]
 name = "proxima-lib"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20b4365fcca8b60be6a55935774b47b63b05552f34f1447395ffee4422215ddd"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -3286,6 +3304,8 @@ dependencies = [
 [[package]]
 name = "proxima-listen"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80a20f85dba2b9e1668fe80731b5ca39fce12a55985b501adc2699266146163d"
 dependencies = [
  "arc-swap",
  "bon",
@@ -3309,6 +3329,8 @@ dependencies = [
 [[package]]
 name = "proxima-macros"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da60af2406301464fbbdf53b0029c35c3085d3f7c2ad565ffc7d6dc20002ac49"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3320,6 +3342,8 @@ dependencies = [
 [[package]]
 name = "proxima-net"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c84e60c9007d49418ee42a44583bad4d09cca1c94ca6619fdbeaef6b64f4e358"
 dependencies = [
  "bytes",
  "futures",
@@ -3335,6 +3359,8 @@ dependencies = [
 [[package]]
 name = "proxima-patterns"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7b2c63380d23ee62f20a2e09a52ca7773c0a0743d3e146c5896eaa90e54f4ca"
 dependencies = [
  "base64 0.22.1",
  "bon",
@@ -3359,6 +3385,8 @@ dependencies = [
 [[package]]
 name = "proxima-prime"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1542cffe812790b2cfee5c43211c828c24490cb0c8b65d4ccd8bd81b0d7fefd"
 dependencies = [
  "arc-swap",
  "atomic-waker",
@@ -3387,6 +3415,8 @@ dependencies = [
 [[package]]
 name = "proxima-primitives"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2e9a260bbd0db0e84c6cb66784034edc07142194863033dc2201589c23ca8c8"
 dependencies = [
  "arc-swap",
  "arrayvec",
@@ -3421,6 +3451,8 @@ dependencies = [
 [[package]]
 name = "proxima-process"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2ed76a401729d4fa5e119d8e6bbf3c60caf35c652701c5dc7626144ecf86443"
 dependencies = [
  "bon",
  "bytes",
@@ -3442,6 +3474,8 @@ dependencies = [
 [[package]]
 name = "proxima-protocols"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5396c88455152164deee89d37b3c1defcf9a418856b6aeca70dac53b04c6d28"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -3456,6 +3490,8 @@ dependencies = [
 [[package]]
 name = "proxima-recording"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd11c03bff1b9a9af814ef9f88365fc36e653900b5b92edad2308b06c2969f9"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -3482,6 +3518,8 @@ dependencies = [
 [[package]]
 name = "proxima-runtime"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e30958a461dee6bb0ce07a41f1b9bf65e3a126c60c70840456c7ee811e1c77b0"
 dependencies = [
  "core_affinity",
  "flume",
@@ -3493,6 +3531,8 @@ dependencies = [
 [[package]]
 name = "proxima-telemetry"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bfd1a44986cec253cd11df27e138fad9ca77bc8e5a74da345335dd5f8ce2402"
 dependencies = [
  "arc-swap",
  "bon",
@@ -3524,6 +3564,8 @@ dependencies = [
 [[package]]
 name = "proxima-test"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97f563004021483dc60b14386a635282ec7e4126ef6728fcf078c324db3b7fa1"
 dependencies = [
  "async-lock",
  "libc",
@@ -3535,6 +3577,8 @@ dependencies = [
 [[package]]
 name = "proxima-tls"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63260311d4d5a7c44655ebd3323c11ba00261265d466ef050c1ef55eaac3df7a"
 dependencies = [
  "base64 0.22.1",
  "proxima-core",
@@ -3547,6 +3591,8 @@ dependencies = [
 [[package]]
 name = "proxima-tokenizer"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc953c25db32207fe737135cbc567274fbb5a484c60cc0f2bfa570e2b3b3407c"
 dependencies = [
  "bon",
  "conflaguration",

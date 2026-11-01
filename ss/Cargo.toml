@@ -16,9 +16,9 @@ futures = "0.3.34"
 ignore = "0.4.34"
 notify = "8.2.1"
 protobuf = "3.7.2"
-proxima = { version = "0.1.0", path = "../../../slot-0/proxima", package = "proxima-lib", default-features = false, features = ["macros", "runtime-tokio", "tokio"] }
-proxima-primitives = { version = "0.1.0", path = "../../../slot-0/proxima/proxima-primitives", features = ["std"] }
-proxima-telemetry = { version = "0.1.0", path = "../../../slot-0/proxima/proxima-telemetry", features = ["std", "emit", "macros"] }
+proxima = { version = "0.1.0", package = "proxima-lib", default-features = false, features = ["macros", "runtime-tokio", "tokio"] }
+proxima-primitives = { version = "0.1.0", features = ["std"] }
+proxima-telemetry = { version = "0.1.0", features = ["std", "emit", "macros"] }
 regex = "1.13.1"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 scip = "0.10.0"
@@ -41,7 +41,7 @@ workspace = true
 
 [dev-dependencies]
 libc = "0.2.191"
-proxima = { path = "../../../slot-0/proxima", package = "proxima-lib", default-features = false, features = ["test-support", "runtime-tokio", "tokio"] }
+proxima = { version = "0.1.0", package = "proxima-lib", default-features = false, features = ["test-support", "runtime-tokio", "tokio"] }
 temp-env = "0.3.6"
 tempfile = "3.27.0"
 tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }

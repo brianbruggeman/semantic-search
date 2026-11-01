@@ -19,5 +19,5 @@ rustix = { version = "1.1.6", features = ["process"] }
 widestring = "1.2.1"
 
 [dev-dependencies]
-proxima = { path = "../../../slot-0/proxima", package = "proxima-lib", default-features = false, features = ["test-support", "tokio"] }
+proxima = { version = "0.1.0", package = "proxima-lib", default-features = false, features = ["test-support", "tokio"] }
 tempfile = "3.27.0"
