@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "ss map --budget 300" }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Grep|Bash",
+        "hooks": [
+          { "type": "command", "command": "sh ~/.claude/hooks/ss-nudge.sh" }
+        ]
+      }
+    ]
+  }
+}
