@@ -1,0 +1,19 @@
+{
+  "pid": 43728,
+  "index": "indexed 1 files (0 unchanged, 0 removed): 1 chunks, 1 embedded, 0 skipped\n",
+  "index_stderr": "",
+  "index_exit": 0,
+  "query": "{\"cut\":0,\"facets\":[{\"query\":\"bounded worker releases work\",\"records\":[{\"called_by\":{\"hidden\":0,\"items\":[],\"more\":0},\"calls\":{\"hidden\":0,\"items\":[],\"more\":0},\"chunk_key\":\"b748074f25ae7919640bb9c398000cf91e4eead5c0a4ef57bb39577553f0c91b\",\"container\":\"\",\"end_line\":3,\"members\":{\"hidden\":0,\"items\":[],\"more\":0},\"path\":\"/private/var/folders/r9/kv1j05355r34570x2f5wpxpr0000gn/T/ss-alloc-hn1rj5j9/corpus/example.md\",\"preview\":[\"Resource lifecycle\",\"\"],\"rank\":1,\"score\":0.03278688524590164,\"start_line\":1,\"symbol\":null,\"tests\":{\"hidden\":0,\"items\":[],\"more\":0}}]}],\"related\":{\"hidden\":0,\"items\":[],\"more\":0},\"schema\":1}\n",
+  "query_stderr": "",
+  "query_exit": 0,
+  "env": {
+    "SS_HOME": "/var/folders/r9/kv1j05355r34570x2f5wpxpr0000gn/T/ss-alloc-hn1rj5j9/home",
+    "SS_EMBEDDER": "fastembed",
+    "SS_EMBED_MODEL": "bge-small-en-v1.5",
+    "SS_EMBED_PROVIDER": "cpu",
+    "SS_WARM_START": "false",
+    "SS_IDLE_SECS": "60",
+    "SS_EMBED_IDLE_SECS": "3600",
+    "MallocStackLogging": "1"
+  }
+}

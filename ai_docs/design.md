@@ -7,7 +7,8 @@
 One arena = one `ssd` owning one set of indexes. Every client call is a short, stateless request admitted into it:
 many connections on one endpoint, requests tagged with an id, reads never block on writes (SQLite WAL, a connection
 per operation), bounded FIFO admission with an explicit `busy` past the queue depth, one watch registry for all
-callers, a crashed client leaves nothing behind (the request still runs to completion; nothing is cancelled).
+callers, connection-owned requests cancelled on disconnect, and abandoned queued embedding jobs skipped. A native
+model call already running finishes before its worker accepts the next job. Watcher work remains daemon-owned.
 
 ## what is mirrored (and what is not there)
 - rg-pool at the read revision is a skeleton: every lib is <= 9 lines (`rg-pool-core/src/lib.rs` is a doc only,
@@ -23,7 +24,8 @@ callers, a crashed client leaves nothing behind (the request still runs to compl
 
 ## process model
 - State dir `<cache_dir>/ss` (override `SS_HOME`): `ssd.lock`, `ssd.sock` (unix), `state.json` (roots + watches),
-  `logs/`, `roots/<blake3(root)[..16]>/index.db` (SQLite: vectors, chunks, FTS5, file table).
+  `logs/`, `roots/<blake3(root)[..16]>/profiles/<blake3(profile)[..16]>/index.db` (SQLite: vectors, chunks, FTS5,
+  file table). Root-level legacy databases remain in place for rollback.
 - Client: connect; on failure spawn `ssd serve --setsid` detached (stdio null; unix: the child calls `setsid` first;
   Windows: `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`), then retry connect (25 ms) until
   `spawn_timeout_ms` (15 s), re-spawning each second since a loser exits at once; one request retry.
@@ -31,6 +33,17 @@ callers, a crashed client leaves nothing behind (the request still runs to compl
   Windows named pipe `\\.\pipe\ss-<fnv1a(home)>` with owner-only DACL `D:P(A;;GA;;;OW)`, remote clients rejected.
 - Single instance: exclusive `File::try_lock` on `ssd.lock` for the process life; the loser exits 0.
 - Idle exit: no watches AND no request for `idle_secs` (600). `status` and `stop` do not count as activity.
+- Embedding models load on demand by default (`SS_WARM_START=false`). Each worker drops its model after
+  `SS_EMBED_IDLE_SECS` (30) without a job, then blocks on its channel with no periodic wakeup. Zero expires
+  when its queue empties. A later request reloads on that worker and pays the model's cold load cost.
+  Explicit warm start still preloads every worker; expiry clears the corresponding warm-readiness counter.
+  Library pools built through existing constructors retain their models unless an idle timeout is supplied.
+- Idle maintenance: `SS_IDLE_COMPACT_SECS` (60; zero disables) starts one pass after a quiet activity generation.
+  Requests, watcher batches, queued embedding jobs and warm-ups share one packed atomic activity state. The
+  blocking task rechecks a quiet snapshot, merges only stale or multi-segment lists using the existing immutable
+  swap, then calls macOS `malloc_zone_pressure_relief(NULL, 0)`. New requests remain admitted during the pass.
+  The structured `idle maintenance complete` event records the allocator's returned byte hint separately from
+  process RSS. Other platforms explicitly report that native page reclamation is unsupported.
 
 ## protocol (`ss-proto`, no_std + alloc, sans-IO)
 JSON lines of `Frame<T>{id, body}`. `Request`: `Search{query,path,limit}`, `Index{path}`, `WatchAdd/Rm{path}`,
@@ -72,8 +85,12 @@ sqlite-vec (exact scan suffices); `CreditGate` and a bespoke `Admit` wrapper for
 
 ## embedding profile and store identity
 `SS_EMBED_PROVIDER` (`cpu` default, `coreml` = CPU+GPU, `coreml_all` = CPU+GPU+ANE; macOS only, other platforms run the CPU provider)
-and `SS_EMBED_MAX_LENGTH` (256) feed `EmbedProfile`. The store pins `bge-small-en-v1.5+<provider>+len<max_length>`
-(`EmbedProfile::store_id`); opening a shard under a different id wipes vectors, chunks and files so vectors from two
+and `SS_EMBED_MAX_LENGTH` (256) feed `EmbedProfile`. CPU identity uses `cpu-explicit`, distinguishing it from older
+`cpu` indexes whose runtime could automatically select CoreML. The pinned fastembed patch in `vendor/fastembed`
+sets ort's `PreferCPU` policy before registering explicit providers; `.cargo/config.toml` selects that patch when
+building from the repository root. Each daemon profile has a separate store directory. The lower-level store still
+resets its own derived rows on an identity change, so daemon profiles never open a legacy database with the new id.
+The store pins `bge-small-en-v1.5+<provider>+len<max_length>` (`EmbedProfile::store_id`) so vectors from two
 profiles are never mixed. Measured on the 329-chunk frozen corpus `ss/tests/data/corpus` with 44 gold queries
 (`ss/tests/data/queries.tsv`, `ss/examples/embed_eval.rs`): CoreML vectors match CPU to 3.4e-7 max abs and rank identically but the
 cold index was 3.3% faster (gpu) or 7.2% slower (all), so CPU stays the default; 128 tokens halves the index time and

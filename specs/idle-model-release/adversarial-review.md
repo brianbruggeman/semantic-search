@@ -1,0 +1,31 @@
+# Adversarial and compliance review
+
+Scope: working diff in `ss/src/embed.rs`, `ss/src/daemon.rs`, `ss/src/settings.rs`, and `specs/idle-model-release/SPEC.md`. Review is from reading the diff and the referenced fixtures; no tests were run for this review.
+
+## Findings
+
+1. **Nonzero expiry, retention, and timer reset have no behavioral coverage.** `ss/src/embed.rs:905` and `:944` exercise only `Duration::ZERO`, while `ss/src/settings.rs:30` configures a nonzero default and `ss/src/embed.rs:431-432` uses `recv_timeout` for it. A worker that drops immediately, fails to reset its timer after a job, or never expires for a positive duration can satisfy the new lane fixtures. Add a channel-synchronized positive-duration fixture for each lane: prove the same model is retained across a second request before expiry, observe its own sender disconnect after idle expiry without a further request, and prove a subsequent request creates a new model and preserves the expected vector. Use deadline-based receives, not sleeps; also exercise work arriving during the interval to establish the deadline restarts after that work.
+
+2. **Readiness restoration is not asserted.** R2 explicitly requires readiness to return after successful reload (`specs/idle-model-release/SPEC.md:20`), but the only reload readiness fixture uses zero expiry and asserts false after its drop (`ss/src/embed.rs:959-965`). Add a positive-duration warmed-pool fixture that observes ready before expiry, false after the owned model disconnects, and true following a successful reload while its new model remains alive. Cover index readiness as well as query readiness. AC2 at `SPEC.md:47` must include the restoration observation.
+
+3. **The daemon acceptance criterion names an oracle the test does not use.** AC4 specifies a model-owned channel-disconnection oracle and release (`specs/idle-model-release/SPEC.md:49`), but `ss/src/embed.rs:1006-1015` builds the hash pool and only waits for `is_warm()` to be false. That can already be false before the loop begins; readiness is cleared before the model is dropped (`ss/src/embed.rs:440-446`). It neither observes destruction nor tests the index lane. Add a daemon-wiring seam with a model-owned drop observer, assert actual destruction on both lanes and subsequent reload with a configured positive interval, and ensure the test cannot pass on an initially false readiness value.
+
+4. **Default-lazy daemon readiness has different observable semantics, without an integration fixture.** `ss/src/settings.rs:27-28` changes the default; `ss/src/embed.rs:329-333,363-367` means a lazy pool always reports `is_warm() == false`, even after a successful query. `ss/tests/arena.rs:326-339` constructs warm and lazy pools explicitly, so it does not exercise the new settings-to-daemon default or status after a query. Add a settings-backed daemon test with warm and idle environment variables absent, check startup and status before and after a successful query, and record the intended false status semantics. `ss/src/daemon.rs:703-704` also logs “embed query workers warm” for this lazy case because `warm_query` returns immediately (`ss/src/embed.rs:378-380`); make that event reflect lazy startup.
+
+5. **The real-process memory observation is not an acceptance criterion.** The problem and evidence decision require a completed real index and repeat request (`specs/idle-model-release/SPEC.md:9,38`), whereas AC1–AC5 (`SPEC.md:44-51`) cover only library tests and do not prescribe the real-process capture. Add an acceptance entry identifying process, model, completed index, worker-owned release observation, post-idle RSS, subsequent request and reload, and capture artifact. A process RSS change alone cannot establish which model was destroyed; record ownership evidence independently and retain the stated allocator caveat.
+
+## Scope observations
+
+The reviewed production hunks introduce no mutex and do not change vector construction, ranking, or store identity. New imports are at module scope, and the new tests use no sleeps. These are observations of the specified diff, not a review of other modified files. The direct ownership oracle at `ss/src/embed.rs:884-898,933-938` observes closure-owned sender destruction independently of an aggregate counter; it does not by itself establish real inference-runtime memory release.
+
+## Revised diff dispositions
+
+1. Positive interval: addressed in `ss/src/embed.rs:933-987`; each lane holds active work longer than its configured interval, observes continued ownership after completion, then observes destruction and reload. The bounded real-time assertions can fail under a sufficiently delayed test process; this is a scheduling sensitivity, not a sleep.
+2. Readiness restoration: addressed in `ss/src/embed.rs:998-1027`; query and index readiness are observed after their respective reloads and after release.
+3. Daemon wiring and ownership oracle: addressed in `ss/src/daemon.rs:680-707` and `ss/src/embed.rs:1048-1085`; the same construction helper is used for production and the lifetime-observing fixture, and the fixture observes both lanes. It covers configured zero, while positive timeout behavior is exercised directly in the lane tests.
+4. Lazy semantics: `ss/src/daemon.rs:714-717` now logs lazy startup accurately. The existing public contract explicitly says lazy pools report false (`ss/src/embed.rs:363-367`); retaining it is intentional. The existing explicit-lazy daemon fixture is `ss/tests/arena.rs:326-339`.
+5. Real-process evidence: pending separately as directed.
+
+### Remaining test/spec discrepancy
+
+`specs/idle-model-release/SPEC.md:47` says each lane observes two drops over two requests for AC1, but the positive interval fixtures issue three requests per lane: initial, held work, and reload (`ss/src/embed.rs:950-977`). The two model loads and releases span those three requests. Update the expected description so the acceptance record matches the exercised sequence. `SPEC.md:50` also reads as though the default 30-second pool itself is observed releasing a model; the fixture checks the default value and observes release with a separately configured zero value (`ss/src/embed.rs:1053-1085`). State those observations separately.
