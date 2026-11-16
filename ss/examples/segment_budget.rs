@@ -196,7 +196,7 @@ fn k4(config: &StoreConfig, dir: &Path, reader: &Store) -> (f64, u64) {
     let owned = dir.to_path_buf();
     let compactor = thread::spawn(move || {
         let start = Instant::now();
-        vector_cache::compact(&owned);
+        let _ = vector_cache::compact(&owned);
         start.elapsed().as_secs_f64() * 1000.0
     });
     let stop = AtomicBool::new(false);

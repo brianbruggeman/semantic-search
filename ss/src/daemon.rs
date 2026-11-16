@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::store::{Store, vector_cache};
 use proxima::pipe::{Admission, DropReason, FailMode, Pipe, SinkFront};
-use proxima::telemetry::{debug, info, warn};
+use proxima::telemetry::{debug, error, info, warn};
 use ss_ipc::{InstanceLock, ListenerExt as _, Stream, listen};
 use ss_proto::{
     DaemonStatus, ErrorKind, Findings, Frame, GraphReply, Hit, IndexStats, LineDecoder, Request,
@@ -16,11 +16,13 @@ use ss_proto::{
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
-use crate::embed::{EmbedPool, EmbedderKind, hash_embed, load_fastembed};
-use crate::error::IndexError;
+use crate::embed::{EmbedOutput, EmbedPool, EmbedderKind, hash_embed, load_fastembed};
+use crate::activity::{Activity, ActivityLease};
+use crate::error::{EmbedError, IndexError};
 use crate::index::{Shard, index_changed, index_tree};
+use crate::memory_reclaim;
 use crate::query::{graph_reply, search, search_findings};
 use crate::registry::{Registry, WatchChange};
 use crate::settings::Settings;
@@ -82,12 +84,25 @@ pub struct Core {
     clients: AtomicUsize,
     last_activity_ms: AtomicU64,
     segments_ready: AtomicBool,
+    activity: Arc<Activity>,
+}
+
+struct ActivityGuard<'a> {
+    core: &'a Core,
+    _lease: ActivityLease,
+}
+
+impl Drop for ActivityGuard<'_> {
+    fn drop(&mut self) {
+        self.core.touch();
+    }
 }
 
 impl Core {
     fn new(settings: Settings, pool: EmbedPool, registry: Registry) -> Self {
         vector_cache::set_limit_mb(settings.vector_cache_mb);
         vector_cache::set_max_segments(settings.vector_segments_max);
+        let activity = pool.activity();
         Self {
             settings,
             hub: WatchHub::default(),
@@ -100,12 +115,20 @@ impl Core {
             clients: AtomicUsize::new(0),
             last_activity_ms: AtomicU64::new(0),
             segments_ready: AtomicBool::new(false),
+            activity,
         }
     }
 
     fn touch(&self) {
         let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.last_activity_ms.store(elapsed, Ordering::Relaxed);
+    }
+
+    fn begin_activity(&self) -> ActivityGuard<'_> {
+        ActivityGuard {
+            core: self,
+            _lease: self.activity.begin(),
+        }
     }
 
     fn idle_for(&self) -> Duration {
@@ -155,6 +178,7 @@ impl Core {
     async fn index_path(&self, path: &Path) -> Result<IndexStats, ServeError> {
         let canonical = canonical_dir(path)?;
         let root = self.root_for_index(&canonical).await?;
+        debug!(scope = ?canonical, root = ?root, "index request started because scope resolved to root");
         let entry = self.entry(&root).await;
         let _serialized = entry.writer.lock().await;
         let stats = index_tree(&entry.shard, &canonical).await?;
@@ -263,6 +287,7 @@ impl Core {
         watch: &Path,
         batch: Batch,
     ) -> Result<IndexStats, ServeError> {
+        let _activity = self.begin_activity();
         let root = self
             .root_of(watch)
             .await
@@ -534,8 +559,14 @@ async fn work_loop(core: Arc<Core>, front: SinkFront<Job>, wake: Arc<Notify>) {
     loop {
         match front.drain_one() {
             Some(job) => {
-                let response = execute(&core, job.work).await;
-                drop(job.reply.send(response));
+                let Job { work, mut reply } = job;
+                tokio::select! {
+                    biased;
+                    () = reply.closed() => {}
+                    response = execute(&core, work) => {
+                        drop(reply.send(response));
+                    }
+                }
             }
             None => wake.notified().await,
         }
@@ -591,6 +622,11 @@ impl Pipe for Router {
     type Err = Infallible;
 
     async fn call(&self, input: Self::In) -> Result<Self::Out, Self::Err> {
+        let _activity = if matches!(&input, Request::Status | Request::WatchList) {
+            None
+        } else {
+            Some(self.core.begin_activity())
+        };
         Ok(match input {
             Request::Search { query, path, limit } => {
                 self.core.touch();
@@ -676,26 +712,40 @@ fn render(outcome: Result<Response, DropReason>) -> Response {
 /// The embed pool a settings value asks for.
 #[must_use]
 pub fn build_pool(settings: &Settings) -> EmbedPool {
-    let (query, index) = (settings.embed_query_workers, settings.embed_workers);
-    let warm = settings.warm_start;
     match settings.embedder_kind() {
-        EmbedderKind::Hash => EmbedPool::with_warm_start(query, index, warm, || Ok(hash_embed)),
+        EmbedderKind::Hash => configured_pool(settings, || Ok(hash_embed)),
         EmbedderKind::FastEmbed => {
             let (cache, threads, profile) = (
                 settings.model_cache_dir(),
                 settings.embed_threads,
                 settings.embed_profile(),
             );
-            EmbedPool::with_warm_start(query, index, warm, move || {
-                load_fastembed(&cache, threads, profile)
-            })
+            configured_pool(settings, move || load_fastembed(&cache, threads, profile))
         }
     }
+}
+
+pub(crate) fn configured_pool<Factory, Model>(settings: &Settings, factory: Factory) -> EmbedPool
+where
+    Factory: Fn() -> Result<Model, EmbedError> + Send + Sync + 'static,
+    Model: FnMut(&[String]) -> EmbedOutput + 'static,
+{
+    EmbedPool::with_idle_timeout(
+        settings.embed_query_workers,
+        settings.embed_workers,
+        settings.warm_start,
+        Some(Duration::from_secs(settings.embed_idle_secs)),
+        factory,
+    )
 }
 
 /// Waits for the query workers to warm, bounded by half the client's spawn wait. A load failure or timeout
 /// degrades (status `warm=false`, models load on first use) rather than hanging or killing the daemon.
 async fn await_warm(pool: &EmbedPool, settings: &Settings) {
+    if !settings.warm_start {
+        debug!("embedding models load lazily because warm start is disabled");
+        return;
+    }
     let limit = Duration::from_millis(settings.spawn_timeout_ms / 2);
     match tokio::time::timeout(limit, pool.warm_query()).await {
         Ok(Ok(())) => info!("embed query workers warm"),
@@ -747,12 +797,45 @@ async fn drain(core: &Core) {
 async fn idle_monitor(core: Arc<Core>) {
     let idle = Duration::from_secs(core.settings.idle_secs);
     let idle_limit_ms = u64::try_from(idle.as_millis()).unwrap_or(u64::MAX);
-    let tick = (idle / 4).clamp(Duration::from_millis(100), Duration::from_secs(5));
+    let compact_secs = core.settings.idle_compact_secs;
+    let compact_limit_ms = compact_secs.saturating_mul(1000);
+    let monitor_interval = if compact_secs == 0 {
+        idle
+    } else {
+        idle.min(Duration::from_secs(compact_secs))
+    };
+    let tick = (monitor_interval / 4).clamp(Duration::from_millis(100), Duration::from_secs(5));
+    let mut last_maintained_epoch = None;
+    let mut quiet_since = None;
     loop {
         tokio::time::sleep(tick).await;
         let clients = core.clients.load(Ordering::Relaxed);
         let watches = core.registry.lock().await.watches.len();
         let idle_ms = u64::try_from(core.idle_for().as_millis()).unwrap_or(u64::MAX);
+        let work_epoch = core.activity.quiet_epoch();
+        if work_epoch.is_none()
+            || quiet_since.is_some_and(|(epoch, _)| Some(epoch) != work_epoch)
+        {
+            quiet_since = None;
+        }
+        let quiet_ms = if let Some(epoch) = work_epoch {
+            let (_, quiet_started) = *quiet_since.get_or_insert((epoch, Instant::now()));
+            u64::try_from(quiet_started.elapsed().as_millis()).unwrap_or(u64::MAX)
+        } else {
+            0
+        };
+        if maintenance_due(
+            compact_limit_ms,
+            quiet_ms,
+            work_epoch,
+            last_maintained_epoch,
+        ) {
+            let Some(epoch) = work_epoch else { continue };
+            let completed = attempt_maintenance(Arc::clone(&core), epoch, quiet_ms).await;
+            if completed.is_some_and(|outcome| outcome.pending_roots == 0) {
+                last_maintained_epoch = Some(epoch);
+            }
+        }
         let quiet = clients == 0 && watches == 0;
         if quiet && idle_ms >= idle_limit_ms {
             info!(
@@ -773,13 +856,66 @@ async fn idle_monitor(core: Arc<Core>) {
     }
 }
 
+async fn attempt_maintenance(
+    core: Arc<Core>,
+    work_epoch: u64,
+    quiet_ms: u64,
+) -> Option<vector_cache::IdleCompaction> {
+    match tokio::task::spawn_blocking(move || {
+        run_if_idle(&core, work_epoch, || {
+            let outcome = vector_cache::compact_idle();
+            if outcome.pending_roots > 0 {
+                return outcome;
+            }
+            let reclaimed = memory_reclaim::reclaim_free_pages();
+            info!(
+                "idle maintenance complete",
+                compacted_roots = outcome.compacted_roots,
+                pending_roots = outcome.pending_roots,
+                allocator_released_bytes = reclaimed.released_bytes,
+                allocator_supported = reclaimed.supported,
+                activity_epoch = work_epoch,
+                idle_ms = quiet_ms
+            );
+            outcome
+        })
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(failure) => {
+            error!(error = %failure, "idle maintenance failed because blocking worker exited");
+            None
+        }
+    }
+}
+
+fn run_if_idle<Work, Output>(core: &Core, epoch: u64, work: Work) -> Option<Output>
+where
+    Work: FnOnce() -> Output,
+{
+    (core.activity.quiet_epoch() == Some(epoch)).then(work)
+}
+
+fn maintenance_due(
+    interval_ms: u64,
+    idle_ms: u64,
+    activity_epoch: Option<u64>,
+    last_maintained_epoch: Option<u64>,
+) -> bool {
+    interval_ms != 0
+        && idle_ms >= interval_ms
+        && activity_epoch.is_some()
+        && last_maintained_epoch != activity_epoch
+}
+
 async fn serve_connection(core: Arc<Core>, router: Arc<Router>, stream: Stream) {
     core.clients.fetch_add(1, Ordering::Relaxed);
     let stream = Arc::new(stream);
     let mut reader = &*stream;
     let write_half = Arc::clone(&stream);
     let (replies, mut outbox) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_task = tokio::spawn(async move {
+    let mut writer_task = tokio::spawn(async move {
         let mut writer = &*write_half;
         while let Some(bytes) = outbox.recv().await {
             if writer.write_all(&bytes).await.is_err() {
@@ -791,7 +927,14 @@ async fn serve_connection(core: Arc<Core>, router: Arc<Router>, stream: Stream) 
     let mut chunk = [0_u8; READ_CHUNK];
     let mut requests = 0_usize;
     let mut probes = 0_usize;
-    while let Ok(read) = reader.read(&mut chunk).await {
+    let mut owned_requests = JoinSet::new();
+    loop {
+        let read = tokio::select! {
+            read = reader.read(&mut chunk) => read,
+            _ = &mut writer_task => break,
+            _ = owned_requests.join_next(), if !owned_requests.is_empty() => continue,
+        };
+        let Ok(read) = read else { break };
         if read == 0 {
             break;
         }
@@ -801,7 +944,7 @@ async fn serve_connection(core: Arc<Core>, router: Arc<Router>, stream: Stream) 
                 Ok(frame) => {
                     requests += 1;
                     probes += usize::from(matches!(frame.body, Request::Status));
-                    tokio::spawn(answer(Arc::clone(&router), frame, replies.clone()));
+                    owned_requests.spawn(answer(Arc::clone(&router), frame, replies.clone()));
                 }
                 Err(error) => {
                     let body = Response::Error {
@@ -814,8 +957,13 @@ async fn serve_connection(core: Arc<Core>, router: Arc<Router>, stream: Stream) 
             }
         }
     }
+    owned_requests.abort_all();
+    while owned_requests.join_next().await.is_some() {}
     drop(replies);
-    let _ = writer_task.await;
+    if !writer_task.is_finished() {
+        writer_task.abort();
+        let _ = writer_task.await;
+    }
     // a client that waited on a long index reply must not leave the daemon already past the idle limit;
     // status probes do not count as activity or polling for the exit would keep the daemon alive
     if requests != probes || requests == 0 {
@@ -837,5 +985,151 @@ fn send_frame(replies: &mpsc::UnboundedSender<Vec<u8>>, frame: &Frame<Response>)
     let mut bytes = Vec::new();
     if encode_frame(frame, &mut bytes).is_ok() {
         let _ = replies.send(bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embed::{EmbedRequest, Lane};
+
+    #[proxima::test(runtime = "tokio")]
+    async fn cost_cancel_closed_reply_skips_admitted_index_work() {
+        let home = tempfile::tempdir().expect("home");
+        let abandoned = tempfile::tempdir().expect("abandoned root");
+        let settings = Settings::load().expect("settings").with_home(home.path());
+        let core = Arc::new(Core::new(
+            settings,
+            EmbedPool::spawn(1, || Ok(hash_embed)),
+            Registry::default(),
+        ));
+        let front = SinkFront::new(2, FailMode::DropNewest);
+        front.arm();
+        let wake = Arc::new(Notify::new());
+        let (reply, answer) = oneshot::channel();
+        drop(answer);
+        let abandoned_path = abandoned.path().to_string_lossy().into_owned();
+        assert!(matches!(
+            front.emit(Job {
+                work: Work::Index(abandoned_path),
+                reply,
+            }),
+            Admission::Accepted
+        ));
+        let worker = tokio::spawn(work_loop(Arc::clone(&core), front.clone(), Arc::clone(&wake)));
+        let response = submit(
+            &front,
+            &wake,
+            Work::Search(SearchArgs {
+                query: "sentinel".to_owned(),
+                path: "missing-root".to_owned(),
+                limit: 1,
+            }),
+        )
+        .await
+        .expect("live request completes after abandoned admission");
+        assert!(matches!(response, Response::Error { .. }));
+        assert_eq!(core.registry.lock().await.roots.len(), 0);
+        worker.abort();
+        let _ = worker.await;
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn idle_compaction_gate_active_owner_and_native_call_prevent_pass() {
+        let home = tempfile::tempdir().expect("home");
+        let (entered, running) = flume::unbounded::<()>();
+        let (release, held) = flume::bounded::<()>(0);
+        let pool = EmbedPool::spawn(1, move || {
+            let entered = entered.clone();
+            let held = held.clone();
+            Ok(move |texts: &[String]| {
+                entered.send(()).expect("native call entered");
+                held.recv().expect("native call released");
+                hash_embed(texts)
+            })
+        });
+        let settings = Settings::load().expect("settings").with_home(home.path());
+        let core = Arc::new(Core::new(settings, pool.clone(), Registry::default()));
+        let prior_quiet = core.activity.quiet_epoch().expect("initial quiet epoch");
+        let owner = core.begin_activity();
+        assert!(attempt_maintenance(Arc::clone(&core), prior_quiet, 2)
+            .await
+            .is_none());
+        let active_pool = pool.clone();
+        let native = tokio::spawn(async move {
+            active_pool
+                .call(EmbedRequest {
+                    texts: vec!["held native call".to_owned()],
+                    lane: Lane::Index,
+                })
+                .await
+        });
+        running.recv_async().await.expect("native model call entered");
+        drop(owner);
+        assert!(!pool.is_idle());
+        assert!(core.activity.quiet_epoch().is_none());
+        assert!(attempt_maintenance(Arc::clone(&core), prior_quiet, 2)
+            .await
+            .is_none());
+        release.send(()).expect("release native model call");
+        native.await.expect("native task").expect("native result");
+        assert!(core.activity.quiet_epoch().is_some());
+        let quiet_epoch = core.activity.quiet_epoch().expect("shared quiet epoch");
+        assert!(attempt_maintenance(Arc::clone(&core), quiet_epoch, 2)
+            .await
+            .is_some());
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn idle_compaction_gate_runs_once_per_quiet_epoch_and_zero_disables() {
+        let home = tempfile::tempdir().expect("home");
+        let settings = Settings::load().expect("settings").with_home(home.path());
+        let pool = EmbedPool::spawn(1, || Ok(hash_embed));
+        let core = Arc::new(Core::new(settings, pool.clone(), Registry::default()));
+        let initial = core.activity.quiet_epoch().expect("initial quiet epoch");
+        assert!(!maintenance_due(0, 100, Some(initial), None));
+        assert!(!maintenance_due(60, 59, Some(initial), None));
+        assert!(!maintenance_due(60, 60, None, None));
+        assert!(maintenance_due(60, 60, Some(initial), None));
+        assert!(attempt_maintenance(Arc::clone(&core), initial, 60)
+            .await
+            .is_some());
+        assert!(!maintenance_due(60, 120, Some(initial), Some(initial)));
+
+        let marker = core.begin_activity();
+        drop(marker);
+        let next = core.activity.quiet_epoch().expect("new quiet epoch");
+        assert!(maintenance_due(60, 60, Some(next), Some(initial)));
+        let (entered, started) = flume::bounded::<()>(0);
+        let (release, held) = flume::bounded::<()>(0);
+        let maintenance_core = Arc::clone(&core);
+        let maintenance = tokio::task::spawn_blocking(move || {
+            run_if_idle(&maintenance_core, next, || {
+                entered.send(()).expect("maintenance began");
+                held.recv().expect("release maintenance");
+                vector_cache::IdleCompaction::default()
+            })
+        });
+        started.recv_async().await.expect("maintenance started");
+        let foreground = core.begin_activity();
+        let vectors = tokio::time::timeout(
+            Duration::from_secs(5),
+            pool.call(EmbedRequest {
+                texts: vec!["foreground sentinel".to_owned()],
+                lane: Lane::Query,
+            }),
+        )
+        .await
+        .expect("foreground call admitted during maintenance")
+        .expect("foreground embedding finished");
+        assert_eq!(vectors.len(), 1);
+        drop(foreground);
+        release.send(()).expect("release maintenance");
+        assert!(maintenance.await.expect("maintenance task").is_some());
+        let after_foreground = core.activity.quiet_epoch().expect("later quiet epoch");
+        assert!(maintenance_due(60, 60, Some(after_foreground), Some(next)));
+        assert!(attempt_maintenance(Arc::clone(&core), after_foreground, 60)
+            .await
+            .is_some());
     }
 }

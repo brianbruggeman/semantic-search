@@ -151,7 +151,7 @@ async fn compaction_leaves_results_unchanged_and_drops_tombstoned_rows() {
     let before = store.vector_search(&probe, "", 50).expect("before");
     let compactions = vector_cache::counters().compactions;
 
-    vector_cache::compact(&config(work.path()).dir);
+    let _ = vector_cache::compact(&config(work.path()).dir);
 
     assert_eq!(store.vector_search(&probe, "", 50).expect("after"), before);
     assert!(
@@ -171,7 +171,7 @@ async fn a_reader_holding_an_old_pointer_sees_a_consistent_old_view_across_a_swa
     let old_hits = held.top(&probe, "", 20);
 
     index_text(&mut store, "added.rs", BODY);
-    vector_cache::compact(&dir);
+    let _ = vector_cache::compact(&dir);
 
     assert_eq!(held.top(&probe, "", 20), old_hits, "held view unchanged");
     assert_ne!(

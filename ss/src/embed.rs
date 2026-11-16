@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use fastembed::{
     ExecutionProviderDispatch, InitOptionsUserDefined, Pooling, QuantizationMode, TextEmbedding,
@@ -16,6 +17,7 @@ use thread_priority::{ThreadPriority, set_current_thread_priority};
 use tokio::sync::oneshot;
 
 use crate::error::EmbedError;
+use crate::activity::{Activity, ActivityLease};
 
 pub type EmbedOutput = Result<Vec<Vec<f32>>, EmbedError>;
 
@@ -167,12 +169,18 @@ impl EmbedProfile {
     pub fn store_id(self, kind: EmbedderKind) -> String {
         match kind {
             EmbedderKind::Hash => kind.model_id().to_owned(),
-            EmbedderKind::FastEmbed => format!(
-                "{}+{}+len{}",
-                self.model,
-                self.provider.name(),
-                self.max_length
-            ),
+            EmbedderKind::FastEmbed => {
+                let provider = match self.provider {
+                    Provider::Cpu => "cpu-explicit",
+                    provider => provider.name(),
+                };
+                format!(
+                    "{}+{}+len{}",
+                    self.model,
+                    provider,
+                    self.max_length
+                )
+            }
         }
     }
 }
@@ -192,6 +200,7 @@ pub struct EmbedRequest {
 struct Job {
     texts: Vec<String>,
     reply: oneshot::Sender<Result<Vec<Vec<f32>>, EmbedError>>,
+    _activity: ActivityLease,
 }
 
 const WARM_TEXT: &str = "warm up";
@@ -211,13 +220,21 @@ struct WarmReport {
 }
 
 impl WarmReport {
+    fn set_ready(&self, lane: Lane, ready: bool) {
+        let counter = match lane {
+            Lane::Query => &self.warmth.query_ready,
+            Lane::Index => &self.warmth.index_ready,
+        };
+        if ready {
+            counter.fetch_add(1, Ordering::Release);
+        } else {
+            counter.fetch_sub(1, Ordering::Release);
+        }
+    }
+
     fn finish(&self, lane: Lane, outcome: Result<(), EmbedError>) {
         if outcome.is_ok() {
-            let counter = match lane {
-                Lane::Query => &self.warmth.query_ready,
-                Lane::Index => &self.warmth.index_ready,
-            };
-            counter.fetch_add(1, Ordering::Release);
+            self.set_ready(lane, true);
         }
         let _ = self.done.send(outcome);
     }
@@ -239,6 +256,7 @@ pub struct EmbedPool {
     index: flume::Sender<Job>,
     warmth: Arc<Warmth>,
     query_warmed: flume::Receiver<Result<(), EmbedError>>,
+    activity: Arc<Activity>,
 }
 
 impl EmbedPool {
@@ -291,6 +309,21 @@ impl EmbedPool {
         Factory: Fn() -> Result<Model, EmbedError> + Send + Sync + 'static,
         Model: FnMut(&[String]) -> EmbedOutput + 'static,
     {
+        Self::with_idle_timeout(query_workers, index_workers, warm, None, factory)
+    }
+
+    /// Releases models after an idle interval; `None` retains them and zero releases when the queue empties.
+    pub fn with_idle_timeout<Factory, Model>(
+        query_workers: usize,
+        index_workers: usize,
+        warm: bool,
+        idle_timeout: Option<Duration>,
+        factory: Factory,
+    ) -> Self
+    where
+        Factory: Fn() -> Result<Model, EmbedError> + Send + Sync + 'static,
+        Model: FnMut(&[String]) -> EmbedOutput + 'static,
+    {
         let (query, query_rx) = flume::unbounded::<Job>();
         let (index, index_rx) = flume::unbounded::<Job>();
         let (query_done, query_warmed) = flume::unbounded();
@@ -301,6 +334,7 @@ impl EmbedPool {
             query_ready: AtomicUsize::new(0),
             index_ready: AtomicUsize::new(0),
         });
+        let activity = Arc::new(Activity::default());
         let factory = Arc::new(factory);
         let report = |done: &flume::Sender<_>| {
             warm.then(|| WarmReport {
@@ -315,6 +349,8 @@ impl EmbedPool {
                 query_rx.clone(),
                 &factory,
                 report(&query_done),
+                idle_timeout,
+                &activity,
             );
         }
         for number in 0..index_workers.max(1) {
@@ -324,6 +360,8 @@ impl EmbedPool {
                 index_rx.clone(),
                 &factory,
                 report(&index_done),
+                idle_timeout,
+                &activity,
             );
         }
         Self {
@@ -331,20 +369,30 @@ impl EmbedPool {
             index,
             warmth,
             query_warmed,
+            activity,
         }
     }
 
-    /// True once every query worker has loaded its model and run its warm-up embed; always false for a lazy pool.
+    /// True while every eagerly warmed query worker has a ready model; false after expiry or for a lazy pool.
     #[must_use]
     pub fn is_warm(&self) -> bool {
         self.warmth.enabled
             && self.warmth.query_ready.load(Ordering::Acquire) >= self.warmth.query_total
     }
 
-    /// Index workers that finished warming; they may trail [`EmbedPool::is_warm`].
+    /// Eagerly warmed index workers whose models have not expired.
     #[must_use]
     pub fn index_warmed(&self) -> usize {
         self.warmth.index_ready.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.activity.quiet_epoch().is_some()
+    }
+
+    pub(crate) fn activity(&self) -> Arc<Activity> {
+        Arc::clone(&self.activity)
     }
 
     /// Resolves when every query worker has reported: `Ok` once all are warm, the first load error otherwise, and
@@ -369,15 +417,18 @@ fn start_worker<Factory, Model>(
     jobs: flume::Receiver<Job>,
     factory: &Arc<Factory>,
     report: Option<WarmReport>,
+    idle_timeout: Option<Duration>,
+    activity: &Arc<Activity>,
 ) where
     Factory: Fn() -> Result<Model, EmbedError> + Send + Sync + 'static,
     Model: FnMut(&[String]) -> EmbedOutput + 'static,
 {
     let factory = Arc::clone(factory);
+    let activity = Arc::clone(activity);
     let name = format!("ss-embed-{lane:?}-{number}").to_lowercase();
     let _ = thread::Builder::new()
         .name(name)
-        .spawn(move || run_worker(lane, &jobs, factory.as_ref(), report.as_ref()));
+        .spawn(move || run_worker(lane, &jobs, factory.as_ref(), report.as_ref(), idle_timeout, &activity));
 }
 
 fn run_worker<Factory, Model>(
@@ -385,6 +436,8 @@ fn run_worker<Factory, Model>(
     jobs: &flume::Receiver<Job>,
     factory: &Factory,
     report: Option<&WarmReport>,
+    idle_timeout: Option<Duration>,
+    activity: &Arc<Activity>,
 ) where
     Factory: Fn() -> Result<Model, EmbedError>,
     Model: FnMut(&[String]) -> EmbedOutput,
@@ -393,13 +446,60 @@ fn run_worker<Factory, Model>(
         let _ = set_current_thread_priority(ThreadPriority::Min);
     }
     let mut model: Option<Model> = None;
+    let mut ready = false;
     if let Some(report) = report {
-        report.finish(lane, warm_up(&mut model, factory));
+        let warming = activity.begin();
+        let outcome = warm_up(&mut model, factory);
+        ready = outcome.is_ok();
+        drop(warming);
+        report.finish(lane, outcome);
     }
-    while let Ok(job) = jobs.recv() {
-        let outcome =
-            ensure_model(&mut model, factory).and_then(|ready| embed_checked(ready, &job.texts));
-        let _ = job.reply.send(outcome);
+    loop {
+        let incoming = match (model.is_some(), idle_timeout) {
+            (true, Some(timeout)) => jobs.recv_timeout(timeout),
+            _ => jobs
+                .recv()
+                .map_err(|_| flume::RecvTimeoutError::Disconnected),
+        };
+        let job = match incoming {
+            Ok(job) => job,
+            Err(flume::RecvTimeoutError::Timeout) => {
+                if ready {
+                    if let Some(report) = report {
+                        report.set_ready(lane, false);
+                    }
+                    ready = false;
+                }
+                model = None;
+                proxima::telemetry::debug!(lane = ?lane, "embedding model released because worker is idle");
+                continue;
+            }
+            Err(flume::RecvTimeoutError::Disconnected) => break,
+        };
+        let Job {
+            texts,
+            reply,
+            _activity: lease,
+        } = job;
+        if reply.is_closed() {
+            continue;
+        }
+        if model.is_none() {
+            proxima::telemetry::debug!(lane = ?lane, "embedding model loading because work arrived");
+        }
+        let outcome = ensure_model(&mut model, factory).and_then(|ready| embed_checked(ready, &texts));
+        if !ready && outcome.is_ok() {
+            if let Some(report) = report {
+                report.set_ready(lane, true);
+            }
+            ready = true;
+        }
+        // End the lease before publishing, so a caller holding the answer is never counted as active work
+        drop(lease);
+        let _ = reply.send(outcome);
+    }
+    if ready && let Some(report) = report {
+        report.set_ready(lane, false);
     }
 }
 
@@ -457,6 +557,7 @@ impl Pipe for EmbedPool {
         let sent = lane.send(Job {
             texts: input.texts,
             reply,
+            _activity: self.activity.begin(),
         });
         async move {
             sent.map_err(|_| EmbedError::PoolClosed)?;
@@ -643,7 +744,11 @@ fn from_snapshot(
 mod tests {
     use std::sync::atomic::AtomicUsize;
 
+    use conflaguration::Settings as _;
+
     use super::*;
+    use crate::daemon::configured_pool;
+    use crate::settings::Settings;
 
     #[test]
     fn every_listed_model_reports_its_dimension_from_fastembed() {
@@ -781,6 +886,51 @@ mod tests {
     }
 
     #[proxima::test(runtime = "tokio")]
+    async fn cost_cancel_abandoned_job_never_enters_the_model() {
+        let (entered, observing) = flume::unbounded::<String>();
+        let (release, held) = flume::bounded::<()>(0);
+        let pool = EmbedPool::spawn(1, move || {
+            let entered = entered.clone();
+            let held = held.clone();
+            Ok(move |texts: &[String]| {
+                let label = texts.first().cloned().expect("one text per fixture job");
+                entered.send(label.clone()).expect("record model call");
+                if label == "hold" {
+                    held.recv().expect("release active model call");
+                }
+                hash_embed(texts)
+            })
+        });
+        let active_pool = pool.clone();
+        let active = tokio::spawn(async move {
+            active_pool
+                .call(EmbedRequest {
+                    texts: vec!["hold".to_owned()],
+                    lane: Lane::Index,
+                })
+                .await
+        });
+        assert_eq!(observing.recv_async().await.expect("active call entered"), "hold");
+
+        let abandoned = pool.call(EmbedRequest {
+            texts: vec!["abandoned".to_owned()],
+            lane: Lane::Index,
+        });
+        drop(abandoned);
+        release.send(()).expect("release active model call");
+        active.await.expect("active task").expect("active embedding");
+        pool.call(EmbedRequest {
+            texts: vec!["next".to_owned()],
+            lane: Lane::Index,
+        })
+        .await
+        .expect("later live embedding");
+
+        assert_eq!(observing.recv_async().await.expect("later model call"), "next");
+        assert!(observing.try_recv().is_err(), "abandoned call reached model");
+    }
+
+    #[proxima::test(runtime = "tokio")]
     async fn model_count_mismatch_is_an_error_not_a_silent_truncation() {
         let pool = EmbedPool::spawn(1, || Ok(|_: &[String]| Ok(Vec::new())));
 
@@ -810,6 +960,257 @@ mod tests {
         EmbedRequest {
             texts: vec!["walk files".to_owned()],
             lane,
+        }
+    }
+
+    fn lifetime_model() -> (impl FnMut(&[String]) -> EmbedOutput, flume::Receiver<()>) {
+        let (lifetime, ended) = flume::bounded::<()>(0);
+        let model = move |texts: &[String]| {
+            let _keep_alive = &lifetime;
+            Ok(vec![vec![1.0, 0.0]; texts.len()])
+        };
+        (model, ended)
+    }
+
+    async fn assert_model_released(vectors: Vec<Vec<f32>>, ended: flume::Receiver<()>) {
+        assert_eq!(vectors, vec![vec![1.0, 0.0]]);
+        let outcome = tokio::time::timeout(Duration::from_secs(5), ended.recv_async())
+            .await
+            .expect("model must drop without another request");
+        assert!(outcome.is_err(), "the model-owned sender must disconnect");
+    }
+
+    async fn assert_idle_lane(lane: Lane) {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let observed_loads = Arc::clone(&loads);
+        let (lifetimes, observations) = flume::unbounded();
+        let pool = EmbedPool::with_idle_timeout(1, 1, false, Some(Duration::ZERO), move || {
+            let (model, ended) = lifetime_model();
+            loads.fetch_add(1, Ordering::SeqCst);
+            lifetimes
+                .send(ended)
+                .expect("lifetime observer remains connected");
+            Ok(model)
+        });
+
+        for _ in 0..2 {
+            let vectors = pool.call(request(lane)).await.expect("embed after expiry");
+            let ended = observations.recv_async().await.expect("model lifetime");
+            assert_model_released(vectors, ended).await;
+        }
+
+        assert_eq!(observed_loads.load(Ordering::SeqCst), 2);
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn idle_model_query_releases_and_reloads() {
+        assert_idle_lane(Lane::Query).await;
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn idle_model_index_releases_and_reloads() {
+        assert_idle_lane(Lane::Index).await;
+    }
+
+    async fn assert_positive_idle_lane(lane: Lane) {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let observed_loads = Arc::clone(&loads);
+        let (lifetimes, observations) = flume::unbounded();
+        let (entered, running) = flume::unbounded();
+        let (release, continue_work) = flume::unbounded();
+        let pool =
+            EmbedPool::with_idle_timeout(1, 1, false, Some(Duration::from_secs(1)), move || {
+                let (mut model, ended) = lifetime_model();
+                let entered = entered.clone();
+                let continue_work = continue_work.clone();
+                loads.fetch_add(1, Ordering::SeqCst);
+                lifetimes
+                    .send(ended)
+                    .expect("positive interval lifetime observer");
+                Ok(move |texts: &[String]| {
+                    if texts.first().is_some_and(|text| text == "hold") {
+                        entered.send(()).expect("busy model observer");
+                        continue_work.recv().expect("release busy model");
+                    }
+                    model(texts)
+                })
+            });
+        assert_eq!(
+            pool.call(request(lane)).await.expect("first model use"),
+            vec![vec![1.0, 0.0]]
+        );
+        let ended = observations
+            .recv_async()
+            .await
+            .expect("first model lifetime");
+        let busy_pool = pool.clone();
+        let busy = tokio::spawn(async move {
+            busy_pool
+                .call(EmbedRequest {
+                    texts: vec!["hold".to_owned()],
+                    lane,
+                })
+                .await
+        });
+        running
+            .recv_async()
+            .await
+            .expect("second job entered model");
+        let during_work =
+            tokio::time::timeout(Duration::from_millis(1200), ended.recv_async()).await;
+        release.send(()).expect("finish second job");
+        let vectors = busy
+            .await
+            .expect("second job task")
+            .expect("second model use");
+        assert!(
+            during_work.is_err(),
+            "active work must retain its model past the idle interval"
+        );
+        assert_eq!(observed_loads.load(Ordering::SeqCst), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), ended.recv_async())
+                .await
+                .is_err(),
+            "idle interval must restart after the second job completes"
+        );
+        assert_model_released(vectors, ended).await;
+
+        let vectors = pool
+            .call(request(lane))
+            .await
+            .expect("reload after positive interval");
+        let ended = observations
+            .recv_async()
+            .await
+            .expect("reloaded model lifetime");
+        assert_model_released(vectors, ended).await;
+        assert_eq!(observed_loads.load(Ordering::SeqCst), 2);
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn idle_model_query_positive_interval_retains_busy_work_and_resets() {
+        assert_positive_idle_lane(Lane::Query).await;
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn idle_model_index_positive_interval_retains_busy_work_and_resets() {
+        assert_positive_idle_lane(Lane::Index).await;
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn idle_oracle_direct_ownership_uses_the_same_release_assertions() {
+        let (mut model, ended) = lifetime_model();
+        let vectors = model(&request(Lane::Query).texts).expect("constant vector oracle");
+        drop(model);
+        assert_model_released(vectors, ended).await;
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn idle_readiness_clears_after_warmed_model_expires() {
+        let (lifetimes, observations) = flume::unbounded();
+        let pool =
+            EmbedPool::with_idle_timeout(1, 1, true, Some(Duration::from_secs(1)), move || {
+                let (model, ended) = lifetime_model();
+                lifetimes
+                    .send(ended)
+                    .expect("lifetime observer remains connected");
+                Ok(model)
+            });
+        pool.warm_query().await.expect("warm completion report");
+        assert!(pool.is_warm(), "query warm-up sets readiness");
+        for _ in 0..2 {
+            let ended = observations.recv_async().await.expect("both models warmed");
+            assert_model_released(vec![vec![1.0, 0.0]], ended).await;
+        }
+        assert!(!pool.is_warm());
+        assert_eq!(pool.index_warmed(), 0);
+
+        let vectors = pool.call(request(Lane::Query)).await.expect("query reload");
+        assert!(
+            pool.is_warm(),
+            "a successful query reload restores readiness"
+        );
+        let ended = observations
+            .recv_async()
+            .await
+            .expect("query model reloaded");
+        assert_model_released(vectors, ended).await;
+        assert!(!pool.is_warm());
+        let vectors = pool.call(request(Lane::Index)).await.expect("index reload");
+        assert_eq!(pool.index_warmed(), 1, "index reload restores readiness");
+        let ended = observations
+            .recv_async()
+            .await
+            .expect("index model reloaded");
+        assert_model_released(vectors, ended).await;
+        assert_eq!(pool.index_warmed(), 0);
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn idle_disabled_existing_constructor_reuses_its_model() {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let observed_loads = Arc::clone(&loads);
+        let pool = EmbedPool::with_lanes(1, 1, move || {
+            loads.fetch_add(1, Ordering::SeqCst);
+            Ok(|texts: &[String]| Ok(vec![vec![1.0, 0.0]; texts.len()]))
+        });
+
+        for _ in 0..2 {
+            assert_eq!(
+                pool.call(request(Lane::Query)).await.expect("reused model"),
+                vec![vec![1.0, 0.0]]
+            );
+        }
+        assert_eq!(observed_loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn idle_settings_defaults_and_zero_expiry_reach_the_daemon_pool() {
+        let defaults = temp_env::with_vars(
+            [
+                ("SS_WARM_START", None::<&str>),
+                ("SS_EMBED_IDLE_SECS", None),
+            ],
+            || Settings::from_env().expect("default idle settings"),
+        );
+        assert!(!defaults.warm_start);
+        assert_eq!(defaults.embed_idle_secs, 30);
+        let settings = temp_env::with_vars(
+            [
+                ("SS_WARM_START", Some("true")),
+                ("SS_EMBED_IDLE_SECS", Some("0")),
+                ("SS_EMBEDDER", Some("hash")),
+                ("SS_EMBED_WORKERS", Some("1")),
+                ("SS_EMBED_QUERY_WORKERS", Some("1")),
+            ],
+            || Settings::from_env().expect("configured idle settings"),
+        );
+        assert_eq!(settings.embed_idle_secs, 0);
+        let (lifetimes, observations) = flume::unbounded();
+        let pool = configured_pool(&settings, move || {
+            let (model, ended) = lifetime_model();
+            lifetimes.send(ended).expect("configured lifetime observer");
+            Ok(model)
+        });
+        pool.warm_query().await.expect("warm daemon pool");
+        for _ in 0..2 {
+            let ended = observations
+                .recv_async()
+                .await
+                .expect("configured warm model");
+            assert_model_released(vec![vec![1.0, 0.0]], ended).await;
+        }
+        for lane in [Lane::Query, Lane::Index] {
+            let vectors = pool
+                .call(request(lane))
+                .await
+                .expect("configured model reload");
+            let ended = observations
+                .recv_async()
+                .await
+                .expect("configured lane model");
+            assert_model_released(vectors, ended).await;
         }
     }
 

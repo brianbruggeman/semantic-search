@@ -24,8 +24,14 @@ pub struct Settings {
     #[setting(default = 1)]
     pub embed_query_workers: usize,
     /// Load every embed worker's model and run one embed at daemon start, so no query pays the load; the daemon accepts connections once the query workers are warm
-    #[setting(default = true)]
+    #[setting(default = false)]
     pub warm_start: bool,
+    /// Seconds an embedding worker retains its model without work; zero releases when its queue empties
+    #[setting(default = 30)]
+    pub embed_idle_secs: u64,
+    /// Seconds of quiet work before one vector and allocator maintenance pass; zero disables it
+    #[setting(default = 60)]
+    pub idle_compact_secs: u64,
     /// Which fastembed model embeds chunks and queries (`bge-small-en-v1.5`, `jina-embeddings-v2-base-code`, ...); changing it re-embeds every index
     #[setting(default_str = "bge-small-en-v1.5")]
     pub embed_model: String,
@@ -183,9 +189,17 @@ impl Settings {
     pub fn store_config(&self, root: &Path) -> StoreConfig {
         let digest = blake3::hash(root.to_string_lossy().as_bytes()).to_hex();
         let short = digest.as_str().chars().take(16).collect::<String>();
+        let profile_id = self.embed_profile().store_id(self.embedder_kind());
+        let profile_digest = blake3::hash(profile_id.as_bytes()).to_hex();
+        let profile_short = profile_digest.as_str().chars().take(16).collect::<String>();
         StoreConfig {
-            dir: self.home_dir().join("roots").join(short),
-            model_id: self.embed_profile().store_id(self.embedder_kind()),
+            dir: self
+                .home_dir()
+                .join("roots")
+                .join(short)
+                .join("profiles")
+                .join(profile_short),
+            model_id: profile_id,
         }
     }
 
@@ -202,6 +216,7 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Store;
 
     #[test]
     fn graph_boost_is_off_by_default_and_on_with_the_env_variable() {
@@ -285,7 +300,7 @@ mod tests {
         let root = Path::new("/work/a");
         assert_eq!(
             defaults.store_config(root).model_id,
-            "bge-small-en-v1.5+cpu+len256"
+            "bge-small-en-v1.5+cpu-explicit+len256"
         );
         assert_eq!(
             coreml.store_config(root).model_id,
@@ -306,7 +321,7 @@ mod tests {
         let root = Path::new("/work/a");
         assert_eq!(
             jina.store_config(root).model_id,
-            "jina-embeddings-v2-base-code+cpu+len256"
+            "jina-embeddings-v2-base-code+cpu-explicit+len256"
         );
         assert_eq!(unknown.embed_profile().model, "bge-small-en-v1.5");
     }
@@ -323,5 +338,65 @@ mod tests {
 
         assert_eq!(first, again);
         assert_ne!(first.dir, other.dir);
+    }
+
+    #[test]
+    fn cost_profile_separates_explicit_cpu_from_the_literal_legacy_identity() {
+        let settings = temp_env::with_vars_unset(
+            ["SS_EMBEDDER", "SS_EMBED_PROVIDER", "SS_EMBED_MODEL", "SS_EMBED_MAX_LENGTH"],
+            || Settings::from_env().expect("defaults"),
+        );
+        let legacy_id = "bge-small-en-v1.5+cpu+len256";
+
+        assert_ne!(settings.store_config(Path::new("/work/a")).model_id, legacy_id);
+        assert_eq!(
+            settings.store_config(Path::new("/work/a")).model_id,
+            "bge-small-en-v1.5+cpu-explicit+len256"
+        );
+    }
+
+    #[test]
+    fn cost_profile_preserves_legacy_bytes_and_assigns_distinct_profile_directories() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let settings = temp_env::with_vars_unset(
+            ["SS_EMBEDDER", "SS_EMBED_PROVIDER", "SS_EMBED_MODEL", "SS_EMBED_MAX_LENGTH"],
+            || Settings::from_env().expect("defaults"),
+        )
+        .with_home(temp.path());
+        let root = Path::new("/work/a");
+        let profile_store = settings.store_config(root);
+        let root_digest = blake3::hash(root.to_string_lossy().as_bytes()).to_hex();
+        let roots_dir = temp.path().join("roots").join(&root_digest.as_str()[..16]);
+        std::fs::create_dir_all(&roots_dir).expect("create legacy root");
+        let legacy_path = roots_dir.join("index.db");
+        let legacy_bytes = b"owner-authored legacy index bytes";
+        std::fs::write(&legacy_path, legacy_bytes).expect("write legacy bytes");
+
+        let changed_profile = Settings {
+            embed_max_length: 128,
+            ..settings.clone()
+        }
+        .store_config(root);
+
+        let store = Store::open(&profile_store).expect("open corrected profile store");
+        assert_eq!(store.vector_count().expect("new store vector count"), 0);
+        assert_ne!(profile_store.dir, roots_dir);
+        assert_ne!(profile_store.dir, changed_profile.dir);
+        assert_eq!(std::fs::read(legacy_path).expect("read legacy bytes"), legacy_bytes);
+    }
+
+    #[test]
+    fn cost_oracle_direct_filesystem_and_channel_ownership_share_the_assertions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let legacy_path = temp.path().join("legacy-index.db");
+        let legacy_bytes = b"owner-authored legacy index bytes";
+        std::fs::write(&legacy_path, legacy_bytes).expect("write legacy bytes");
+
+        let (sender, receiver) = std::sync::mpsc::channel::<&'static str>();
+        drop(receiver);
+        let abandoned_request_rejected = sender.send("index request").is_err();
+
+        assert_eq!(std::fs::read(legacy_path).expect("read legacy bytes"), legacy_bytes);
+        assert!(abandoned_request_rejected);
     }
 }

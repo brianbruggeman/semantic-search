@@ -1,6 +1,7 @@
 //! `ss` core: gitignore-aware walk, chunking, embedding, SQLite store and hybrid query, all composed from pipes.
 
 pub mod chunk;
+mod activity;
 pub mod client;
 pub mod context;
 pub mod daemon;
@@ -12,6 +13,7 @@ pub mod graph;
 pub mod history;
 pub mod index;
 pub mod map;
+mod memory_reclaim;
 pub mod pipeline;
 pub mod query;
 pub mod read;

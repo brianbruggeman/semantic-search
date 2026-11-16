@@ -829,7 +829,7 @@ mod tests {
 
         assert_eq!(
             jina.store_id(EmbedderKind::FastEmbed),
-            "jina-embeddings-v2-base-code+cpu+len256"
+            "jina-embeddings-v2-base-code+cpu-explicit+len256"
         );
     }
 }
