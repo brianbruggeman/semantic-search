@@ -12,8 +12,10 @@ use ss::client::Client;
 use ss::daemon::{RunOutcome, ServeError, run};
 use ss::embed::{EmbedPool, hash_embed};
 use ss::settings::Settings;
-use ss_proto::{DaemonStatus, ErrorKind, Request, Response};
+use ss_ipc::connect;
+use ss_proto::{DaemonStatus, ErrorKind, Frame, Request, Response, encode_frame};
 use support::{Env, copy_dir, wait_until_listening};
+use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 
 const QUERY_TRIGGER: &str = "embed pool worker";
@@ -39,6 +41,9 @@ fn index(path: &Path) -> Request {
 struct Gate {
     armed: Arc<AtomicBool>,
     entered: Arc<AtomicUsize>,
+    observed: Arc<AtomicUsize>,
+    arrival: flume::Receiver<()>,
+    announce: flume::Sender<()>,
     release: flume::Sender<()>,
     wait: flume::Receiver<()>,
 }
@@ -46,27 +51,43 @@ struct Gate {
 impl Gate {
     fn new() -> Self {
         let (release, wait) = flume::unbounded::<()>();
+        let (announce, arrival) = flume::unbounded::<()>();
         Self {
             armed: Arc::new(AtomicBool::new(false)),
             entered: Arc::new(AtomicUsize::new(0)),
+            observed: Arc::new(AtomicUsize::new(0)),
+            arrival,
+            announce,
             release,
             wait,
         }
     }
 
     fn pool(&self, workers: usize, trigger: &'static str) -> EmbedPool {
-        let (armed, entered, wait) = (
+        let (armed, entered, observed, announce, wait) = (
             Arc::clone(&self.armed),
             Arc::clone(&self.entered),
+            Arc::clone(&self.observed),
+            self.announce.clone(),
             self.wait.clone(),
         );
         EmbedPool::spawn(workers, move || {
-            let (armed, entered, wait) = (Arc::clone(&armed), Arc::clone(&entered), wait.clone());
+            let (armed, entered, observed, announce, wait) = (
+                Arc::clone(&armed),
+                Arc::clone(&entered),
+                Arc::clone(&observed),
+                announce.clone(),
+                wait.clone(),
+            );
             Ok(move |texts: &[String]| {
-                let held =
-                    armed.load(Ordering::SeqCst) && texts.iter().any(|text| text.contains(trigger));
+                let triggered = texts.iter().any(|text| text.contains(trigger));
+                if triggered {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+                let held = armed.load(Ordering::SeqCst) && triggered;
                 if held {
                     entered.fetch_add(1, Ordering::SeqCst);
+                    announce.send(()).expect("announce gated model call");
                     let _ = wait.recv();
                 }
                 hash_embed(texts)
@@ -138,6 +159,80 @@ fn write_marked_file(env: &Env) {
         "pub fn marked() -> &'static str {{\n    let token = \"{INDEX_TRIGGER}\";\n    token\n}}\n"
     );
     std::fs::write(env.root().join("src/marked.rs"), body).expect("write marked file");
+}
+
+#[proxima::test(runtime = "tokio")]
+async fn cost_disconnect_stops_later_file_batches_and_preserves_live_indexing() {
+    let env = Env::new();
+    let gate = Gate::new();
+    let settings = Settings {
+        index_cap: 1,
+        embed_workers: 1,
+        ..env.settings()
+    };
+    let (client, daemon) = start(&env, settings.clone(), gate.pool(1, INDEX_TRIGGER)).await;
+    let abandoned = env.root().join("abandoned");
+    let live = env.root().join("live");
+    std::fs::create_dir_all(&abandoned).expect("abandoned scope");
+    std::fs::create_dir_all(&live).expect("live scope");
+    for file_number in 0..32 {
+        std::fs::write(
+            abandoned.join(format!("marker_{file_number}.rs")),
+            format!("pub fn marker_{file_number}() -> &'static str {{ \"{INDEX_TRIGGER}_{file_number}\" }}\n"),
+        )
+        .expect("write abandoned fixture file");
+    }
+    let live_file = live.join("authored.rs");
+
+    gate.arm();
+    let mut abandoned_connection = connect(&settings.endpoint())
+        .await
+        .expect("connect abandoned client");
+    let mut frame_bytes = Vec::new();
+    encode_frame(
+        &Frame {
+            id: 99,
+            body: index(&abandoned),
+        },
+        &mut frame_bytes,
+    )
+    .expect("encode index request");
+    abandoned_connection
+        .write_all(&frame_bytes)
+        .await
+        .expect("submit abandoned request");
+    gate.arrival
+        .recv_async()
+        .await
+        .expect("first abandoned model call entered");
+    drop(abandoned_connection);
+
+    let cleared_lane = tokio::time::timeout(Duration::from_secs(20), client.send(index(&live)))
+        .await
+        .expect("empty live index completes while native call remains blocked");
+    assert!(
+        matches!(&cleared_lane, Ok(Response::Indexed { stats }) if stats.files_seen == 0),
+        "empty live scope did not clear canceled request: {cleared_lane:?}"
+    );
+    std::fs::write(&live_file, "pub fn authored_fixture() -> &'static str { \"live author token\" }\n")
+        .expect("write live fixture file");
+    gate.open();
+    let indexed = tokio::time::timeout(Duration::from_secs(20), client.send(index(&live)))
+        .await
+        .expect("live index completes after disconnect");
+    assert!(matches!(indexed, Ok(Response::Indexed { .. })), "{indexed:?}");
+    let result = client.send(search(&live, 5)).await;
+    let Ok(Response::Hits { hits }) = result else {
+        panic!("live search returns authored rows: {result:?}")
+    };
+    let canonical_live_file = std::fs::canonicalize(&live_file).expect("canonical fixture path");
+    assert!(
+        hits.iter()
+            .any(|hit| Path::new(&hit.path) == canonical_live_file),
+        "live search missed authored fixture: {hits:?}"
+    );
+    assert_eq!(gate.observed.load(Ordering::SeqCst), 1);
+    stop(&client, daemon).await;
 }
 
 #[proxima::test(runtime = "tokio")]

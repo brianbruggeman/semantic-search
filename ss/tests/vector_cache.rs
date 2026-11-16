@@ -2,7 +2,9 @@
 // tests assert with expect messages
 #![allow(clippy::expect_used)]
 
+use std::env;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -258,6 +260,41 @@ async fn racing_writers_on_one_file_publish_in_commit_order() {
 
 #[proxima::test(runtime = "tokio")]
 async fn publishing_past_the_memory_cap_drops_the_list_and_falls_back_to_sqlite() {
+    const ISOLATED_CHILD: &str = "SS_VECTOR_CACHE_CAP_ISOLATED_CHILD";
+    const TEST_NAME: &str =
+        "publishing_past_the_memory_cap_drops_the_list_and_falls_back_to_sqlite";
+
+    let arguments: Vec<String> = env::args().skip(1).collect();
+    let is_isolated_child = env::var(ISOLATED_CHILD).as_deref() == Ok("1")
+        && arguments.len() == 4
+        && arguments[0] == "--exact"
+        && arguments[1] == TEST_NAME
+        && arguments[2] == "--nocapture"
+        && arguments[3] == "--test-threads=1";
+
+    if !is_isolated_child {
+        let executable = env::current_exe().expect("test executable");
+        let output = Command::new(executable)
+            .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+            .env(ISOLATED_CHILD, "1")
+            .output()
+            .expect("isolated cap test process");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success()
+                && stdout.contains("running 1 test")
+                && stdout.contains("1 passed; 0 failed"),
+            "isolated cap test failed; status={}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status
+        );
+        return;
+    }
+
+    assert!(
+        is_isolated_child,
+        "cap mutation must run in its isolated child"
+    );
     let work = tempfile::tempdir().expect("tempdir");
     let mut store = loaded_store(work.path());
     let dir = config(work.path()).dir;
@@ -313,5 +350,9 @@ async fn a_list_loaded_from_an_empty_shard_still_serves_later_writes_without_sca
     let found = store.vector_search(&probe, "first.rs", 5).expect("search");
 
     assert!(!found.is_empty(), "first write visible");
-    assert_eq!(vector_cache::counters().scans, scans_before, "no scan_sqlite fallback");
+    assert_eq!(
+        vector_cache::counters().scans,
+        scans_before,
+        "no scan_sqlite fallback"
+    );
 }
