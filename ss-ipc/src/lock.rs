@@ -14,7 +14,14 @@ impl InstanceLock {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = File::options().create(true).append(true).open(path)?;
+        // Read-write, not append: on Windows `.append(true)` opens the handle with
+        // FILE_APPEND_DATA only, and `LockFileEx` needs GENERIC_READ or GENERIC_WRITE,
+        // so the lock is refused with ERROR_ACCESS_DENIED.
+        let file = File::options()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)?;
         match file.try_lock() {
             Ok(()) => Ok(Some(Self { _file: file })),
             Err(TryLockError::WouldBlock) => Ok(None),
