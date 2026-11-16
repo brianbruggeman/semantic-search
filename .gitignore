@@ -1,2 +1,17 @@
 /target
 **/target
+
+# spec run artifacts: measurement output stays on disk, never in history
+specs/**/*.log
+specs/**/*.jsonl
+specs/**/*.txt
+specs/**/*.gz
+specs/**/*.stdout
+specs/**/*.stderr
+specs/**/logs/
+specs/**/outputs/
+specs/**/__pycache__/
+specs/idle-model-release/allocation-ready
+
+# vendored crate checkouts carry their own build junk
+vendor/**/node_modules/
