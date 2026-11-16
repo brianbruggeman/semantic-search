@@ -19,6 +19,7 @@ impl InstanceLock {
         // so the lock is refused with ERROR_ACCESS_DENIED.
         let file = File::options()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path)?;
